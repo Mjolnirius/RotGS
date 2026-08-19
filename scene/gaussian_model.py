@@ -268,6 +268,8 @@ class GaussianModel:
             if self.number_of_cameras == 7: # axis initialization for multi-camera system
                 axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.8,0.2],[0,0.71,0.71],[0,0.2,0.8],[0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
             elif self.number_of_cameras == 6:
+                # Only used when multi_camera=True and number_of_cameras==6; the released code appears to be
+                # missing a comma between two axis entries, causing a runtime error. Single-camera training is unaffected.
                 axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.71,0.71],[0,0.71,0.71][0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
             elif self.number_of_cameras == 5:
                 axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.7,0.7],[0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
