@@ -9,8 +9,8 @@ from pathlib import Path
 # CONFIGURATION
 # ============================================================
 
-SQUARES_X = 12
-SQUARES_Y = 9
+SQUARES_X = 9
+SQUARES_Y = 12
 
 SQUARE_LENGTH = 0.030   # 30 mm
 MARKER_LENGTH = 0.022   # 22 mm
@@ -226,6 +226,8 @@ board = cv2.aruco.CharucoBoard(
     dictionary
 )
 
+board.setLegacyPattern(True)
+
 
 detector_params = cv2.aruco.DetectorParameters()
 
@@ -404,15 +406,45 @@ print("STEP 3 — CAMERA CALIBRATION")
 print("=" * 70)
 
 
-rms, camera_matrix, dist_coeffs, rvecs, tvecs = \
-    cv2.aruco.calibrateCameraCharuco(
-        charucoCorners=all_charuco_corners,
-        charucoIds=all_charuco_ids,
-        board=board,
-        imageSize=image_size,
-        cameraMatrix=None,
-        distCoeffs=None
-    )
+if hasattr(cv2.aruco, "calibrateCameraCharuco"):
+
+    rms, camera_matrix, dist_coeffs, rvecs, tvecs = \
+        cv2.aruco.calibrateCameraCharuco(
+            charucoCorners=all_charuco_corners,
+            charucoIds=all_charuco_ids,
+            board=board,
+            imageSize=image_size,
+            cameraMatrix=None,
+            distCoeffs=None
+        )
+
+else:
+
+    all_object_points = []
+    all_image_points = []
+
+    for charuco_corners, charuco_ids in zip(
+        all_charuco_corners,
+        all_charuco_ids,
+    ):
+
+        object_points, image_points = \
+            board.matchImagePoints(
+                charuco_corners,
+                charuco_ids,
+            )
+
+        all_object_points.append(object_points)
+        all_image_points.append(image_points)
+
+    rms, camera_matrix, dist_coeffs, rvecs, tvecs = \
+        cv2.calibrateCamera(
+            objectPoints=all_object_points,
+            imagePoints=all_image_points,
+            imageSize=image_size,
+            cameraMatrix=None,
+            distCoeffs=None,
+        )
 
 
 # ============================================================
@@ -508,9 +540,32 @@ np.savez(
 )
 
 
+cameras_file = image_folder.parent / "cameras.txt"
+
+cameras_contents = (
+    "# Camera list with one line of data per camera:\n"
+    "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n"
+    "# Number of cameras: 1\n"
+    f"1 PINHOLE {image_size[0]} {image_size[1]} "
+    f"{fx:.17g} {fy:.17g} {cx:.17g} {cy:.17g}\n"
+)
+
+with cameras_file.open(
+    "w",
+    encoding="utf-8",
+    newline="\n",
+) as file:
+
+    file.write(cameras_contents)
+
+
 print()
 print(f"Saved calibration to:")
 print(output_file.resolve())
+
+print()
+print(f"Saved COLMAP camera to:")
+print(cameras_file.resolve())
 
 print()
 print("=" * 70)
