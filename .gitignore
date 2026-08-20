@@ -6,3 +6,10 @@ diff_rasterization/dist
 tensorboard_3d
 screenshots
 output
+
+
+# Ignore all files with the following extensions - keep dataset structure
+*.png
+*.ply
+*.db
+*.ini
