@@ -21,7 +21,8 @@ from tqdm import tqdm
 
 
 JPEG_EXTENSIONS = {".jpg", ".jpeg"}
-OUTPUT_SUFFIX = "_rn_roi_PNGa_ds"
+SQUARE_OUTPUT_SUFFIX = "_rn_roi_sqr_PNGa"
+SOURCE_ASPECT_OUTPUT_SUFFIX = "_rn_roi_PNGa_ds"
 INTEGER_TOKEN_PATTERN = re.compile(r"(?<![\d.])-?\d+(?![\d.])")
 CropBox = tuple[int, int, int, int]
 
@@ -188,6 +189,82 @@ def fit_selection_to_aspect(
         crop_left + crop_width,
         crop_top + crop_height,
     )
+
+
+def fit_selection_to_smallest_square(
+    selection: CropBox,
+    image_size: tuple[int, int],
+) -> CropBox:
+    """Fit the smallest in-image square containing the product selection.
+
+    The crop is always made from real source pixels: it never stretches the
+    image and never adds padding. Its side length is the larger selection
+    dimension, and it is centered on the selection wherever image bounds allow.
+    """
+    image_width, image_height = image_size
+    left, top, right, bottom = selection
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError(f"invalid image dimensions: {image_size}")
+    if not (0 <= left < right <= image_width):
+        raise ValueError(
+            f"crop x-coordinates must satisfy 0 <= left < right <= {image_width}; "
+            f"got left={left}, right={right}"
+        )
+    if not (0 <= top < bottom <= image_height):
+        raise ValueError(
+            f"crop y-coordinates must satisfy 0 <= top < bottom <= {image_height}; "
+            f"got top={top}, bottom={bottom}"
+        )
+
+    selection_width = right - left
+    selection_height = bottom - top
+    square_size = max(selection_width, selection_height)
+    if square_size > image_width or square_size > image_height:
+        raise ValueError(
+            "the selected product box cannot fit inside an unpadded square crop: "
+            f"selection={selection_width}x{selection_height}, "
+            f"image={image_width}x{image_height}"
+        )
+
+    center_x = (left + right) / 2.0
+    center_y = (top + bottom) / 2.0
+    crop_left = round(center_x - square_size / 2.0)
+    crop_top = round(center_y - square_size / 2.0)
+
+    # Each crop origin must both remain inside the image and contain the full
+    # selection. These bounds also handle a product selected near an edge.
+    minimum_left = max(0, right - square_size)
+    maximum_left = min(left, image_width - square_size)
+    minimum_top = max(0, bottom - square_size)
+    maximum_top = min(top, image_height - square_size)
+    crop_left = max(minimum_left, min(crop_left, maximum_left))
+    crop_top = max(minimum_top, min(crop_top, maximum_top))
+
+    if not (
+        crop_left <= left < right <= crop_left + square_size
+        and crop_top <= top < bottom <= crop_top + square_size
+    ):
+        raise ValueError(
+            "could not position the square crop without clipping the selected "
+            f"product box {selection}"
+        )
+    return (
+        crop_left,
+        crop_top,
+        crop_left + square_size,
+        crop_top + square_size,
+    )
+
+
+def crop_box_for_selection(
+    selection: CropBox,
+    image_size: tuple[int, int],
+    square_crop: bool,
+) -> CropBox:
+    """Create either the default tight square or legacy source-aspect crop."""
+    if square_crop:
+        return fit_selection_to_smallest_square(selection, image_size)
+    return fit_selection_to_aspect(selection, image_size)
 
 
 def calculate_output_size(
@@ -537,6 +614,7 @@ def choose_processing_settings(
     working_max_width: int,
     display_max_width: int,
     display_max_height: int,
+    square_crop: bool,
 ) -> tuple[CropBox, CropBox, float]:
     """Select ROI and confirm segmentation on the first ordered image."""
     while True:
@@ -545,7 +623,7 @@ def choose_processing_settings(
             display_max_width=display_max_width,
             display_max_height=display_max_height,
         )
-        crop_box = fit_selection_to_aspect(selection, image.size)
+        crop_box = crop_box_for_selection(selection, image.size, square_crop)
         crop_left, crop_top, _crop_right, _crop_bottom = crop_box
         product_box = (
             selection[0] - crop_left,
@@ -613,6 +691,7 @@ def _print_summary(summary: dict[str, Any]) -> None:
     )
     print(f"  Source dimensions:        {summary['source_size']}")
     print(f"  Product box:              {summary['selection']}")
+    print(f"  Crop mode:                {summary['crop_mode']}")
     print(f"  Applied crop:             {summary['crop_box']}")
     print(f"  Output dimensions:        {summary['output_size']}")
     print(
@@ -642,8 +721,9 @@ def prepare_rotgs_sequence(
     display_max_height: int = 900,
     angle_token_from_right: int | None = None,
     confirm_segmentation: bool = True,
+    square_crop: bool = True,
 ) -> dict[str, Any]:
-    """Prepare JPGs and cameras in sibling ``*_rn_roi_PNGa_ds`` folder."""
+    """Prepare JPGs and cameras in a sibling RotGS-ready output folder."""
     started_at = time.perf_counter()
     input_folder = Path(folder_name).expanduser().resolve(strict=True)
     input_cameras_file = Path(cameras_file).expanduser().resolve(strict=True)
@@ -653,7 +733,16 @@ def prepare_rotgs_sequence(
         raise ValueError(f"cameras path is not a file: {input_cameras_file}")
     if target_width <= 0:
         raise ValueError("target_width must be positive")
-    output_folder = input_folder.with_name(f"{input_folder.name}{OUTPUT_SUFFIX}")
+    if square_crop:
+        copied_input_name = (
+            input_folder.name
+            if input_folder.name.casefold().endswith("_cpy")
+            else f"{input_folder.name}_cpy"
+        )
+        output_name = f"{copied_input_name}{SQUARE_OUTPUT_SUFFIX}"
+    else:
+        output_name = f"{input_folder.name}{SOURCE_ASPECT_OUTPUT_SUFFIX}"
+    output_folder = input_folder.with_name(output_name)
     if output_folder.exists():
         raise FileExistsError(
             f"output folder already exists; refusing to mix runs: {output_folder}"
@@ -700,9 +789,10 @@ def prepare_rotgs_sequence(
                 segmentation_max_width,
                 display_max_width,
                 display_max_height,
+                square_crop,
             )
         else:
-            crop_box = fit_selection_to_aspect(selection, source_size)
+            crop_box = crop_box_for_selection(selection, source_size, square_crop)
             chosen_threshold = background_threshold
             if confirm_segmentation:
                 cropped_preview = first_rgb.crop(crop_box)
@@ -748,6 +838,10 @@ def prepare_rotgs_sequence(
         suffix=".tmp",
     ) as temporary_directory:
         staging_folder = Path(temporary_directory)
+        output_images_folder = staging_folder / "images"
+        output_sparse_folder = staging_folder / "sparse" / "0"
+        output_images_folder.mkdir(parents=True)
+        output_sparse_folder.mkdir(parents=True)
         for ordered_image in tqdm(
             ordered_images,
             desc="Preparing RotGS sequence",
@@ -783,7 +877,7 @@ def prepare_rotgs_sequence(
             finally:
                 rgba.close()
 
-            output_path = staging_folder / ordered_image.output_name
+            output_path = output_images_folder / ordered_image.output_name
             try:
                 resized.save(output_path, format="PNG")
             finally:
@@ -820,6 +914,7 @@ def prepare_rotgs_sequence(
             ],
             "source_size": list(source_size),
             "product_selection_left_top_right_bottom": list(selection),
+            "crop_mode": "smallest_square" if square_crop else "source_aspect",
             "crop_box_left_top_right_bottom": list(crop_box),
             "crop_size": list(crop_size),
             "output_size": list(output_size),
@@ -831,7 +926,7 @@ def prepare_rotgs_sequence(
                 "maximum": max(alpha_fractions),
             },
         }
-        (staging_folder / "cameras.txt").write_text(
+        (output_sparse_folder / "cameras.txt").write_text(
             updated_cameras_text,
             encoding="utf-8",
         )
@@ -845,7 +940,7 @@ def prepare_rotgs_sequence(
         "input_folder": str(input_folder),
         "input_cameras_file": str(input_cameras_file),
         "output_folder": str(output_folder),
-        "output_cameras_file": str(output_folder / "cameras.txt"),
+        "output_cameras_file": str(output_folder / "sparse" / "0" / "cameras.txt"),
         "metadata_file": str(output_folder / "preprocessing_metadata.json"),
         "found": len(ordered_images),
         "processed": len(ordered_images),
@@ -853,6 +948,7 @@ def prepare_rotgs_sequence(
         "angle_token_from_right": detected_angle_index,
         "source_size": f"{source_size[0]}x{source_size[1]}",
         "selection": str(selection),
+        "crop_mode": "smallest square" if square_crop else "source aspect",
         "crop_box": str(crop_box),
         "output_size": f"{output_size[0]}x{output_size[1]}",
         "background_threshold": chosen_threshold,
@@ -868,8 +964,9 @@ def prepare_rotgs_sequence(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Rename a 5-degree JPG sequence, select an aspect-preserving ROI, "
-            "create foreground RGBA masks, downscale, and update cameras.txt."
+            "Rename a 5-degree JPG sequence, use the selected product box to "
+            "position a square ROI, create foreground RGBA masks, downscale, "
+            "and update cameras.txt."
         )
     )
     parser.add_argument("folder_name", help="folder containing source JPG files")
@@ -882,7 +979,15 @@ def _parse_args() -> argparse.Namespace:
         "--width",
         type=int,
         default=540,
-        help="final image width in pixels (default: 540)",
+        help="final image width and, by default, height in pixels (default: 540)",
+    )
+    parser.add_argument(
+        "--keep-source-aspect",
+        action="store_true",
+        help=(
+            "use the previous source-aspect crop instead of the default smallest "
+            "square crop"
+        ),
     )
     parser.add_argument(
         "--background-threshold",
@@ -929,6 +1034,7 @@ def main() -> int:
             display_max_width=args.display_max_width,
             display_max_height=args.display_max_height,
             angle_token_from_right=args.angle_token_from_right,
+            square_crop=not args.keep_source_aspect,
         )
     except (FileNotFoundError, FileExistsError, OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
