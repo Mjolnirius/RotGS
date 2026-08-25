@@ -13,3 +13,7 @@ output
 *.ply
 *.db
 *.ini
+
+# Keep milestone report media portable.
+!milestones/assets/
+!milestones/assets/**/*.png

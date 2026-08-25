@@ -39,11 +39,11 @@ The images below are existing artifacts from the dataset and saved render folder
 
 | Prepared RGBA input | First square run, 30k |
 |---|---|
-| <img src="../datasets/alphashot/session2/products/Quoellfrisch_02_top_cpy_rn_roi_sqr_PNGa/images/0000.png" width="360" alt="Prepared Quoellfrisch RGBA input"> | <img src="../output/Quoellfrisch_02_top_cpy_rn_roi_sqr_PNGa_full/test/ours_30000/renders/00000.png" width="360" alt="Initial square-dataset render at 30000 iterations"> |
+| <img src="assets/milestone_01/prepared_rgba_input.png" width="360" alt="Prepared Quoellfrisch RGBA input"> | <img src="assets/milestone_01/square_baseline_30k.png" width="360" alt="Initial square-dataset render at 30000 iterations"> |
 
 | Corrected model, 10k | Current best, 30k |
 |---|---|
-| <img src="../output/Quoellfrisch_02_top_center_xyz_noflow_ccw_10k/test/ours_10000/renders/00000.png" width="360" alt="Corrected no-flow positive-direction render at 10000 iterations"> | <img src="../output/Quoellfrisch_02_top_center_xyz_noflow_ccw_30k/test/ours_30000/renders/00000.png" width="360" alt="Current best can render at 30000 iterations"> |
+| <img src="assets/milestone_01/corrected_noflow_positive_10k.png" width="360" alt="Corrected no-flow positive-direction render at 10000 iterations"> | <img src="assets/milestone_01/current_best_30k.png" width="360" alt="Current best can render at 30000 iterations"> |
 
 The progression shows why more iterations alone were not the first answer. The initial model had already converged to an angle-averaged texture. Once pose convention, center initialization, and XYZ learning were corrected—and flow was removed—the same 540×540 data could support much more coherent lettering.
 
@@ -53,19 +53,19 @@ The saved intermediate renders make the debugging path more concrete. These are 
 
 | First square model at 7k: an averaged cylinder | Exact-angle run at 15k: axis escaped toward x |
 |---|---|
-| <img src="../output/Quoellfrisch_02_top_cpy_rn_roi_sqr_PNGa_full/test/ours_7000/renders/00000.png" width="360" alt="First square can reconstruction at 7000 iterations, strongly blurred"> | <img src="../output/Quoellfrisch_02_top_cpy_rn_roi_sqr_PNGa_cw_exact_angles_15k/test/ours_15000/renders/00000.png" width="360" alt="Unconstrained exact-angle reconstruction whose learned axis moved near the x axis"> |
+| <img src="assets/milestone_01/square_baseline_blurred_7k.png" width="360" alt="First square can reconstruction at 7000 iterations, strongly blurred"> | <img src="assets/milestone_01/x_axis_failure_15k.png" width="360" alt="Unconstrained exact-angle reconstruction whose learned axis moved near the x axis"> |
 
 The 7k baseline had found the coarse can silhouette, but it averaged many angular textures into one translucent label. In the exact-angle experiment on the right, the unconstrained learned axis became proportional to `[2.987, 0.435, -0.322]`, or approximately `[0.984, 0.143, -0.106]` after normalization. It therefore rotated almost around the camera x-axis. The displaced top and twisted texture are the visible consequence. This result directly motivated initializing the axis near the physical expectation and constraining its tilt and sideways component without freezing it completely.
 
 | Fixed y-axis but freely learned center at 7k | Bounded axis/center with flow at 30k |
 |---|---|
-| <img src="../output/Quoellfrisch_02_top_cpy_rn_roi_sqr_PNGa_cw_exact_fixed_axis_learned_center_15k/test/ours_7000/renders/00000.png" width="360" alt="Fixed-axis learned-center experiment with detached fragments at 7000 iterations"> | <img src="../output/Quoellfrisch_02_top_constrained_alpha_flow2_30k/test/ours_30000/renders/00000.png" width="360" alt="Constrained alpha and optical-flow experiment at 30000 iterations"> |
+| <img src="assets/milestone_01/learned_center_failure_7k.png" width="360" alt="Fixed-axis learned-center experiment with detached fragments at 7000 iterations"> | <img src="assets/milestone_01/constrained_flow_failure_30k.png" width="360" alt="Constrained alpha and optical-flow experiment at 30000 iterations"> |
 
 Fixing the axis alone did not solve motion: the freely learned center moved the rotational orbit away from the product, creating a second thin can-like fragment at the left. The later bounded model kept the product together, but strong optical-flow supervision still produced wispy background Gaussians and an angle-averaged label even after 30k. This comparison motivated alpha-centroid center initialization, center warm-up/regularization, and the controlled no-flow experiment.
 
 | Correct center/XYZ but no densification | Correct center/XYZ and no flow, wrong sign `-1` |
 |---|---|
-| <img src="../output/Quoellfrisch_02_top_center_xyz_nodensify_10k/test/ours_10000/renders/00000.png" width="360" alt="Corrected-center experiment without further densification at 10000 iterations"> | <img src="../output/Quoellfrisch_02_top_center_xyz_noflow_10k/test/ours_10000/renders/00000.png" width="360" alt="No-flow corrected-center experiment with rotation direction minus one"> |
+| <img src="assets/milestone_01/no_densification_10k.png" width="360" alt="Corrected-center experiment without further densification at 10000 iterations"> | <img src="assets/milestone_01/wrong_rotation_sign_10k.png" width="360" alt="No-flow corrected-center experiment with rotation direction minus one"> |
 
 The left result demonstrates that real XYZ learning was necessary but did not eliminate the need for early densification. The right result removed flow and used the improved center and XYZ scale, yet retained sign `-1`; it still averaged the label and left orbiting artifacts. Changing only the internal sign to `+1` produced the sharp 25.92 dB 10k result shown earlier.
 
@@ -615,7 +615,7 @@ The continuation improved steadily:
 
 | 15k | 20k | 25k |
 |---|---|---|
-| <img src="../output/Quoellfrisch_02_top_center_xyz_noflow_ccw_30k/test/ours_15000/renders/00000.png" width="245" alt="Corrected can continuation at 15000 iterations"> | <img src="../output/Quoellfrisch_02_top_center_xyz_noflow_ccw_30k/test/ours_20000/renders/00000.png" width="245" alt="Corrected can continuation at 20000 iterations"> | <img src="../output/Quoellfrisch_02_top_center_xyz_noflow_ccw_30k/test/ours_25000/renders/00000.png" width="245" alt="Corrected can continuation at 25000 iterations"> |
+| <img src="assets/milestone_01/corrected_continuation_15k.png" width="245" alt="Corrected can continuation at 15000 iterations"> | <img src="assets/milestone_01/corrected_continuation_20k.png" width="245" alt="Corrected can continuation at 20000 iterations"> | <img src="assets/milestone_01/corrected_continuation_25k.png" width="245" alt="Corrected can continuation at 25000 iterations"> |
 
 The later checkpoints no longer change the gross pose. They progressively reduce translucency and orbiting fragments, sharpen the top rim and pull tab, stabilize the Swiss emblem, and improve the large `Quöllfrisch` lettering. The visual gain from 25k to 30k is small, matching the metric plateau.
 
