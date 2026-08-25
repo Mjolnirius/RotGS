@@ -22,13 +22,11 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
     if image.mode == 'RGBA':
         image_rgba_np = np.array(image)  # shape: (H, W, 4)
         alpha_channel = image_rgba_np[:, :, 3]  # shape: (H, W)
-        binary_mask = (alpha_channel != 0).astype(np.float32)
+        alpha_mask = alpha_channel.astype(np.float32) / 255.0
         background = Image.new("RGB", image.size, (255, 255, 255))
         image = Image.alpha_composite(background.convert("RGBA"), image).convert("RGB")
-        alpha_mask = binary_mask
     else:
-        image_rgb_np = np.array(image)
-        gray = image_rgb_np.convert("L")
+        gray = image.convert("L")
         gray_np = np.array(gray)
         binary_mask = (gray_np != 255).astype(np.float32)
         alpha_mask = binary_mask
@@ -53,9 +51,17 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
+    intrinsic_scale_x = resolution[0] / orig_w
+    intrinsic_scale_y = resolution[1] / orig_h
+    use_principal_point = not getattr(args, "legacy_centered_projection", False)
+
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   image=image, alpha_mask=alpha_mask,
+                  fx=cam_info.fx * intrinsic_scale_x if use_principal_point else None,
+                  fy=cam_info.fy * intrinsic_scale_y if use_principal_point else None,
+                  cx=cam_info.cx * intrinsic_scale_x if use_principal_point else None,
+                  cy=cam_info.cy * intrinsic_scale_y if use_principal_point else None,
                   image_name=cam_info.image_name, uid=id, time = cam_info.time, rotation_angle=cam_info.rotation_angle, cam_idx=cam_info.cam_idx, data_device=args.data_device,
                   train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
 
@@ -80,11 +86,13 @@ def camera_to_JSON(id, camera : Camera):
     camera_entry = {
         'id' : id,
         'img_name' : camera.image_name,
-        'width' : camera.width,
-        'height' : camera.height,
+        'width' : camera.image_width,
+        'height' : camera.image_height,
         'position': pos.tolist(),
         'rotation': serializable_array_2d,
-        'fy' : fov2focal(camera.FovY, camera.height),
-        'fx' : fov2focal(camera.FovX, camera.width)
+        'fy' : camera.fy if camera.fy is not None else fov2focal(camera.FoVy, camera.image_height),
+        'fx' : camera.fx if camera.fx is not None else fov2focal(camera.FoVx, camera.image_width),
+        'cx' : camera.cx,
+        'cy' : camera.cy,
     }
     return camera_entry

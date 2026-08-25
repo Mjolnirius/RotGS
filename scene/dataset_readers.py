@@ -39,6 +39,10 @@ class CameraInfo:
     depth_path: str
     width: int
     height: int
+    fx: float
+    fy: float
+    cx: float
+    cy: float
     is_test: bool
     rotation_angle : float
     cam_idx : int = 0
@@ -76,12 +80,40 @@ def getNerfppNorm(cam_info):
     translate = -center
     return {"translate": translate, "radius": radius}
 
-def readFixedCameras(cam_intrinsics, images_folder, test_cam_names_list, cam_idx=0):
+def readFixedCameras(
+    cam_intrinsics,
+    images_folder,
+    test_cam_names_list,
+    cam_idx=0,
+    angle_noise_std=0.0,
+    rotation_direction=-1,
+):
     cam_infos = []
     images_paths = [i for i in os.listdir(images_folder) if i.endswith(('.jpg', '.png', 'jpeg'))]
     images_paths = sorted(images_paths)
-    angle_array = torch.linspace(0, -2 * np.pi, steps=len(images_paths)) # single one full rotation (coarse angle)
-    angle_array = add_noise(angle_array, noise_std=0.5, seed=1304) # to replicate residual noise, Add gaussian noise to coarse angle
+    if rotation_direction not in {-1, 1}:
+        raise ValueError("rotation_direction must be either -1 or 1")
+    angle_array = torch.linspace(
+        0,
+        rotation_direction * 2 * np.pi,
+        steps=len(images_paths),
+    )
+    direction_label = (
+        "counter-clockwise (+)" if rotation_direction > 0 else "clockwise (-)"
+    )
+    print(f"Rotation direction: {direction_label}")
+    if not np.isfinite(angle_noise_std) or angle_noise_std < 0:
+        raise ValueError(
+            "angle_noise_std must be a finite value greater than or equal to zero"
+        )
+    if angle_noise_std > 0:
+        angle_array = add_noise(
+            angle_array,
+            noise_std=angle_noise_std,
+            seed=1304,
+        )
+    else:
+        print("Use exact evenly spaced rotation angles (no synthetic noise)")
 
     for idx, img in enumerate(images_paths):
         sys.stdout.write('\r')
@@ -110,11 +142,16 @@ def readFixedCameras(cam_intrinsics, images_folder, test_cam_names_list, cam_idx
         
         if intr.model=="SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
+            focal_length_y = focal_length_x
+            principal_x = intr.params[1]
+            principal_y = intr.params[2]
             FovY = focal2fov(focal_length_x, height)
             FovX = focal2fov(focal_length_x, width)
         elif intr.model=="PINHOLE":
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
+            principal_x = intr.params[2]
+            principal_y = intr.params[3]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
         else:
@@ -122,7 +159,10 @@ def readFixedCameras(cam_intrinsics, images_folder, test_cam_names_list, cam_idx
     
         image_path = os.path.join(images_folder, img)
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=None, time=normalized_time,
-                              image_path=image_path, image_name=img, depth_path="", width=width, height=height, is_test=image_path in test_cam_names_list,
+                              image_path=image_path, image_name=img, depth_path="", width=width, height=height,
+                              fx=float(focal_length_x), fy=float(focal_length_y),
+                              cx=float(principal_x), cy=float(principal_y),
+                              is_test=img in test_cam_names_list,
                               rotation_angle=rotation_angle, cam_idx=cam_idx)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
@@ -163,7 +203,17 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readFixedSceneInfo(path, images, eval, train_test_exp, random_init=True, llffhold=8, eval_mode=False): 
+def readFixedSceneInfo(
+    path,
+    images,
+    eval,
+    train_test_exp,
+    random_init=True,
+    llffhold=8,
+    eval_mode=False,
+    angle_noise_std=0.0,
+    rotation_direction=-1,
+):
     # get intrinstic parameter
     try:
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -188,7 +238,12 @@ def readFixedSceneInfo(path, images, eval, train_test_exp, random_init=True, llf
     # get images
     reading_dir = "images" if images == None else images
     cam_infos_unsorted, distance = readFixedCameras(
-        cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir), test_cam_names_list=test_cam_names_list)
+        cam_intrinsics=cam_intrinsics,
+        images_folder=os.path.join(path, reading_dir),
+        test_cam_names_list=test_cam_names_list,
+        angle_noise_std=angle_noise_std,
+        rotation_direction=rotation_direction,
+    )
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     train_cam_infos = []
@@ -201,6 +256,17 @@ def readFixedSceneInfo(path, images, eval, train_test_exp, random_init=True, llf
             train_cam_infos.append(i)
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
+    # All views in a fixed-camera turntable sequence share the same physical
+    # camera centre.  NeRF++ normalization therefore reports a zero radius,
+    # which in turn makes the Gaussian XYZ learning rate exactly zero.  Use
+    # the known camera-to-object distance as the scene scale instead.
+    if not np.isfinite(nerf_normalization["radius"]) or nerf_normalization["radius"] <= 1e-8:
+        nerf_normalization = dict(nerf_normalization)
+        nerf_normalization["radius"] = float(distance)
+        print(
+            "Fixed-camera normalization radius was zero; "
+            f"using camera distance {distance:.6g} for spatial learning"
+        )
 
     if random_init:
         # init from random points
@@ -241,7 +307,17 @@ def readFixedSceneInfo(path, images, eval, train_test_exp, random_init=True, llf
                            distance=distance)
     return scene_info
 
-def readMultiSceneInfo(path, images, eval, train_test_exp, random_init=True, llffhold=8, eval_mode=False): 
+def readMultiSceneInfo(
+    path,
+    images,
+    eval,
+    train_test_exp,
+    random_init=True,
+    llffhold=8,
+    eval_mode=False,
+    angle_noise_std=0.0,
+    rotation_direction=-1,
+):
     camera_dir = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
     camera_dir.sort()
     train_cam_infos = []
@@ -273,7 +349,13 @@ def readMultiSceneInfo(path, images, eval, train_test_exp, random_init=True, llf
         # get images
         reading_dir = "images" if images == None else images
         cam_infos_unsorted, distance = readFixedCameras(
-            cam_intrinsics=cam_intrinsics, images_folder=os.path.join(camera_path, reading_dir), test_cam_names_list=test_cam_names_list, cam_idx=cam_idx)
+            cam_intrinsics=cam_intrinsics,
+            images_folder=os.path.join(camera_path, reading_dir),
+            test_cam_names_list=test_cam_names_list,
+            cam_idx=cam_idx,
+            angle_noise_std=angle_noise_std,
+            rotation_direction=rotation_direction,
+        )
         cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
         train_cam_infos_curr = []

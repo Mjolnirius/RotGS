@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+import math
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, get_cosine_lr_func, build_rotation, axis_angle2rotmat, build_quaternion
 from utils.general_utils import cartesian_to_spherical, spherical_to_cartesian, inverse_activate_theta_phi, get_pose_angle, quaternion_multiply, rotate_vector_by_quaternion
 # from utils.reloc_utils import compute_relocation_cuda
@@ -24,9 +25,69 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from e3nn import o3
+from PIL import Image
+
+
+def estimate_fixed_rotation_center(cam_infos, camera_distance):
+    """Back-project the mean foreground centroid into the object-depth plane."""
+    if not cam_infos or not np.isfinite(camera_distance) or camera_distance <= 0:
+        return None
+
+    world_centers = []
+    for cam in cam_infos:
+        with Image.open(cam.image_path) as source_image:
+            if "A" in source_image.getbands():
+                foreground = np.asarray(
+                    source_image.getchannel("A"), dtype=np.float64
+                ) / 255.0
+            else:
+                rgb = np.asarray(source_image.convert("RGB"), dtype=np.uint8)
+                foreground = np.any(rgb < 250, axis=-1).astype(np.float64)
+
+        foreground_sum = float(foreground.sum())
+        if foreground_sum <= 0:
+            continue
+
+        yy, xx = np.indices(foreground.shape, dtype=np.float64)
+        u = float((foreground * xx).sum() / foreground_sum)
+        v = float((foreground * yy).sum() / foreground_sum)
+        camera_point = np.array(
+            [
+                (u - cam.cx) * camera_distance / cam.fx,
+                (v - cam.cy) * camera_distance / cam.fy,
+                camera_distance,
+            ],
+            dtype=np.float32,
+        )
+        # COLMAP convention used here: X_camera = R.T @ X_world + T.
+        world_point = np.asarray(cam.R, dtype=np.float32) @ (
+            camera_point - np.asarray(cam.T, dtype=np.float32)
+        )
+        world_centers.append(world_point)
+
+    if not world_centers:
+        return None
+    return np.mean(world_centers, axis=0, dtype=np.float32)
 
 class GaussianModel:
-    def __init__(self, sh_degree, optimizer_type="default", fixed_camera=False, wo_axis=False, multi_camera=False, number_of_cameras=1):
+    def __init__(
+        self,
+        sh_degree,
+        optimizer_type="default",
+        fixed_camera=False,
+        wo_axis=False,
+        multi_camera=False,
+        number_of_cameras=1,
+        freeze_axis=False,
+        freeze_center=False,
+        axis_mode="free",
+        axis_tilt_init_deg=30.0,
+        axis_tilt_min_deg=0.0,
+        axis_tilt_max_deg=90.0,
+        axis_side_limit_deg=5.0,
+        center_max_offset=0.25,
+        center_warmup_iterations=2000,
+    ):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
@@ -45,12 +106,40 @@ class GaussianModel:
         self.distance = None
         self.fixed_camera = fixed_camera
         self.wo_axis = wo_axis
+        # Keep --wo_axis backward-compatible: historically it froze both the
+        # rotation axis and the rotation center.
+        self.freeze_axis = wo_axis or freeze_axis
+        self.freeze_center = wo_axis or freeze_center
+        if axis_mode not in {"free", "bounded_tilt"}:
+            raise ValueError("axis_mode must be either 'free' or 'bounded_tilt'")
+        if not 0 <= axis_tilt_min_deg < axis_tilt_max_deg <= 180:
+            raise ValueError("axis tilt bounds must satisfy 0 <= min < max <= 180")
+        if not axis_tilt_min_deg <= axis_tilt_init_deg <= axis_tilt_max_deg:
+            raise ValueError("initial axis tilt must lie inside the configured bounds")
+        if not 0 <= axis_side_limit_deg < 90:
+            raise ValueError("axis_side_limit_deg must lie in [0, 90)")
+        if center_max_offset < 0:
+            raise ValueError("center_max_offset must be greater than or equal to zero")
+        if center_warmup_iterations < 0:
+            raise ValueError("center_warmup_iterations must be greater than or equal to zero")
+        self.axis_mode = axis_mode
+        self.axis_tilt_init_deg = float(axis_tilt_init_deg)
+        self.axis_tilt_min_rad = math.radians(axis_tilt_min_deg)
+        self.axis_tilt_max_rad = math.radians(axis_tilt_max_deg)
+        self.axis_side_limit_rad = math.radians(axis_side_limit_deg)
+        self.center_max_offset = float(center_max_offset)
+        self.center_warmup_iterations = int(center_warmup_iterations)
         self.multi_camera = multi_camera
         self.number_of_cameras = number_of_cameras
-        axis_init = torch.tensor([0.0, 1.0, 0.0])          # shape (3,)
+        if self.axis_mode == "bounded_tilt":
+            tilt = math.radians(self.axis_tilt_init_deg)
+            axis_init = torch.tensor([0.0, math.cos(tilt), math.sin(tilt)])
+        else:
+            axis_init = torch.tensor([0.0, 1.0, 0.0])
         center_point_init = torch.tensor([0.0, 0.0, 0.0])  # shape (3,)
         self._axis = axis_init[None, :].repeat(self.number_of_cameras, 1)                   # shape (num_cameras, 3)
         self._center_point = center_point_init[None, :].repeat(self.number_of_cameras, 1)  # shape (num_cameras, 3)
+        self._center_initial = self._center_point.detach().clone()
         self.setup_functions()
 
     def setup_functions(self):
@@ -83,9 +172,14 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            self._axis.detach(),
+            self._center_point.detach(),
+            self._center_initial.detach(),
         )
     
     def restore(self, model_args, training_args):
+        legacy_checkpoint = len(model_args) == 12
+        core_args = model_args if legacy_checkpoint else model_args[:12]
         (self.active_sh_degree,
         self._xyz, 
         self._features_dc, 
@@ -97,7 +191,16 @@ class GaussianModel:
         xyz_gradient_accum, 
         denom,
         opt_dict, 
-        self.spatial_lr_scale) = model_args
+        self.spatial_lr_scale) = core_args
+        if not legacy_checkpoint:
+            axis, center_point, center_initial = model_args[12:15]
+            self._axis = nn.Parameter(
+                axis.detach().clone().requires_grad_(not self.freeze_axis)
+            )
+            self._center_point = nn.Parameter(
+                center_point.detach().clone().requires_grad_(not self.freeze_center)
+            )
+            self._center_initial = center_initial.detach().clone()
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -138,10 +241,53 @@ class GaussianModel:
         return self._exposure
    
     def get_axis(self, cam_idx):
-        return self.axis_activation(self._axis[cam_idx])
+        axis = self.axis_activation(self._axis[cam_idx])
+        if self.axis_mode == "free":
+            return axis
+
+        side = torch.asin(torch.clamp(axis[0], -1.0, 1.0))
+        tilt = torch.atan2(axis[2], axis[1])
+        side = torch.clamp(
+            side, -self.axis_side_limit_rad, self.axis_side_limit_rad
+        )
+        tilt = torch.clamp(tilt, self.axis_tilt_min_rad, self.axis_tilt_max_rad)
+        cos_side = torch.cos(side)
+        return torch.stack(
+            [
+                torch.sin(side),
+                cos_side * torch.cos(tilt),
+                cos_side * torch.sin(tilt),
+            ]
+        )
     
     def get_center(self, cam_idx):
-        return self._center_point[cam_idx]
+        if self.center_max_offset == 0:
+            return self._center_initial[cam_idx]
+        delta = self._center_point[cam_idx] - self._center_initial[cam_idx]
+        bounded_delta = self.center_max_offset * torch.tanh(
+            delta / self.center_max_offset
+        )
+        return self._center_initial[cam_idx] + bounded_delta
+
+    def motion_regularization(self):
+        if self.freeze_center or self.center_max_offset == 0:
+            return self._xyz.new_zeros(())
+        center_delta = torch.stack(
+            [
+                self.get_center(cam_idx) - self._center_initial[cam_idx]
+                for cam_idx in range(self.number_of_cameras)
+            ]
+        )
+        return torch.mean(center_delta.square())
+
+    def motion_summary(self, cam_idx=0):
+        axis = self.get_axis(cam_idx)
+        tilt = torch.rad2deg(torch.atan2(axis[2], axis[1]))
+        side = torch.rad2deg(torch.asin(torch.clamp(axis[0], -1.0, 1.0)))
+        center_shift = torch.linalg.vector_norm(
+            self.get_center(cam_idx) - self._center_initial[cam_idx]
+        )
+        return tilt, side, center_shift
    
     def rotate_shs(self, shs_feat, rotation_matrix):
         rotation_matrix = rotation_matrix.detach()
@@ -263,14 +409,19 @@ class GaussianModel:
             self.active_sh_degree += 1
 
     def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
-        center_point = torch.tensor(np.mean(pcd.points, axis=0)).cuda()
+        center_source = "point-cloud mean"
+        center_point_np = np.mean(pcd.points, axis=0)
+        if self.fixed_camera and not self.multi_camera:
+            image_center = estimate_fixed_rotation_center(cam_infos, self.distance)
+            if image_center is not None:
+                center_point_np = image_center
+                center_source = "alpha-mask centroid"
+        center_point = torch.tensor(center_point_np).float().cuda()
         if self.multi_camera: # Camera numbers increase from front view to top view
             if self.number_of_cameras == 7: # axis initialization for multi-camera system
                 axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.8,0.2],[0,0.71,0.71],[0,0.2,0.8],[0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
             elif self.number_of_cameras == 6:
-                # Only used when multi_camera=True and number_of_cameras==6; the released code appears to be
-                # missing a comma between two axis entries, causing a runtime error. Single-camera training is unaffected.
-                axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.71,0.71],[0,0.71,0.71][0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
+                axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.71,0.71],[0,0.71,0.71],[0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
             elif self.number_of_cameras == 5:
                 axis = torch.tensor([[0,0.8,0.2],[0,0.8,0.2],[0,0.7,0.7],[0,0.2,0.8],[0,0.2,0.8]]).float().cuda()
             elif self.number_of_cameras == 4:
@@ -282,9 +433,18 @@ class GaussianModel:
                 axis = axis[None, :].repeat(self.number_of_cameras, 1) # shape (num_cameras, 3)
         else:
             axis = torch.tensor([[0, 1.0, 0.0]]).float().cuda() # initial axis(camera up vector), (single_camera)
+
+        if self.axis_mode == "bounded_tilt":
+            tilt = math.radians(self.axis_tilt_init_deg)
+            bounded_axis = torch.tensor(
+                [0.0, math.cos(tilt), math.sin(tilt)],
+                dtype=torch.float,
+                device="cuda",
+            )
+            axis = bounded_axis[None, :].repeat(self.number_of_cameras, 1)
         
         print(f"initial axis: {axis}")
-        print(f"initial center point: {center_point}")
+        print(f"initial center point ({center_source}): {center_point}")
 
         center_point = center_point[None, :].repeat(self.number_of_cameras, 1)  # shape (num_cameras, 3)
 
@@ -302,12 +462,11 @@ class GaussianModel:
         rots[:, 0] = 1
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
         
-        if self.wo_axis:
-            self._center_point = nn.Parameter(center_point, requires_grad=False)
-            self._axis = nn.Parameter(axis, requires_grad=False)
-        else:
-            self._center_point = nn.Parameter(center_point, requires_grad=True)
-            self._axis = nn.Parameter(axis, requires_grad=True)
+        self._center_point = nn.Parameter(
+            center_point, requires_grad=not self.freeze_center
+        )
+        self._center_initial = center_point.detach().clone()
+        self._axis = nn.Parameter(axis, requires_grad=not self.freeze_axis)
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -360,6 +519,20 @@ class GaussianModel:
         
         self.axis_scheduler_args = get_cosine_lr_func(training_args.center_axis_lr_init, training_args.center_axis_lr_final,
                                                         max_steps=training_args.center_axis_lr_max_steps)
+        self.bounded_axis_scheduler_args = get_cosine_lr_func(
+            training_args.axis_lr_init,
+            training_args.axis_lr_final,
+            max_steps=training_args.center_axis_lr_max_steps,
+        )
+        self.center_scheduler_args = get_cosine_lr_func(
+            training_args.center_lr_init,
+            training_args.center_lr_final,
+            max_steps=max(
+                1,
+                training_args.center_axis_lr_max_steps
+                - self.center_warmup_iterations,
+            ),
+        )
   
 
     def update_learning_rate(self, iteration):
@@ -374,11 +547,21 @@ class GaussianModel:
                 param_group['lr'] = lr
                 
             if param_group['name'] == "axis":
-                lr = self.axis_scheduler_args(iteration)
+                scheduler = (
+                    self.bounded_axis_scheduler_args
+                    if self.axis_mode == "bounded_tilt"
+                    else self.axis_scheduler_args
+                )
+                lr = 0.0 if self.freeze_axis else scheduler(iteration)
                 param_group['lr'] = lr
 
             if param_group['name'] == "center_point":
-                lr = self.axis_scheduler_args(iteration)
+                if self.freeze_center or iteration <= self.center_warmup_iterations:
+                    lr = 0.0
+                else:
+                    lr = self.center_scheduler_args(
+                        iteration - self.center_warmup_iterations
+                    )
                 param_group['lr'] = lr    
 
     def construct_list_of_attributes(self):
@@ -405,8 +588,12 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
-        axis = self._axis.detach().cpu().numpy()
-        center = self._center_point.detach().cpu().numpy()
+        axis = torch.stack(
+            [self.get_axis(i) for i in range(self.number_of_cameras)]
+        ).detach().cpu().numpy()
+        center = torch.stack(
+            [self.get_center(i) for i in range(self.number_of_cameras)]
+        ).detach().cpu().numpy()
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
@@ -418,6 +605,15 @@ class GaussianModel:
         np.save(axis_path, axis)
         center_path = os.path.join(os.path.dirname(path), "center.npy")
         np.save(center_path, center)
+        motion_path = os.path.join(os.path.dirname(path), "motion.json")
+        motion_data = {
+            "axis_mode": self.axis_mode,
+            "axis": axis.tolist(),
+            "center": center.tolist(),
+            "center_initial": self._center_initial.detach().cpu().numpy().tolist(),
+        }
+        with open(motion_path, "w", encoding="utf-8") as motion_file:
+            json.dump(motion_data, motion_file, indent=2)
 
     def reset_scale_rotation(self):
         dist2 = torch.clamp_min(distCUDA2(self.get_xyz), 0.0000001)
@@ -490,12 +686,22 @@ class GaussianModel:
         axis_path = os.path.join(os.path.dirname(path), "axis.npy")
         if os.path.exists(axis_path):
             axis = np.load(axis_path)
-            self._axis = nn.Parameter(torch.tensor(axis, dtype=torch.float, device="cuda").requires_grad_(True))
+            self._axis = nn.Parameter(
+                torch.tensor(axis, dtype=torch.float, device="cuda").requires_grad_(
+                    not self.freeze_axis
+                )
+            )
 
         center_path = os.path.join(os.path.dirname(path), "center.npy")
         if os.path.exists(center_path):
             center_point = np.load(center_path)
-            self._center_point = nn.Parameter(torch.tensor(center_point, dtype=torch.float, device="cuda").requires_grad_(True))
+            center_tensor = torch.tensor(
+                center_point, dtype=torch.float, device="cuda"
+            )
+            self._center_point = nn.Parameter(
+                center_tensor.requires_grad_(not self.freeze_center)
+            )
+            self._center_initial = center_tensor.detach().clone()
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -661,7 +867,3 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
-
-
-    
-    

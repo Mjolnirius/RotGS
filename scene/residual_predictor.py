@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 from utils.general_utils import get_expon_lr_func
 import matplotlib.pyplot as plt
 from utils.system_utils import searchForMaxIteration
@@ -7,11 +8,33 @@ import os
 import numpy as np
 
 class ResidualPredictor(nn.Module):
-    def __init__(self, number_of_cameras=1, num_ctrl_points=1, device="cuda"):
+    def __init__(
+        self,
+        number_of_cameras=1,
+        num_ctrl_points=1,
+        device="cuda",
+        max_residual_angle_deg=0.0,
+        max_sweep_error_deg=0.0,
+    ):
         super().__init__()
+        if max_residual_angle_deg < 0:
+            raise ValueError("max_residual_angle_deg must be greater than or equal to 0")
+        if max_sweep_error_deg < 0:
+            raise ValueError("max_sweep_error_deg must be greater than or equal to 0")
+
         self.num_ctrl_points = num_ctrl_points
+        self.max_residual_angle_rad = (
+            math.radians(max_residual_angle_deg)
+            if max_residual_angle_deg > 0
+            else None
+        )
+        self.max_sweep_error_rad = math.radians(max_sweep_error_deg)
         self.residuals = nn.Parameter(
             torch.zeros(number_of_cameras, num_ctrl_points + 1, device=device)
+        )
+        self.sweep_error = nn.Parameter(
+            torch.zeros(number_of_cameras, device=device),
+            requires_grad=max_sweep_error_deg > 0,
         )
         ctrl_positions = torch.linspace(0, 1, num_ctrl_points + 1, device=device)
         self.register_buffer("ctrl_positions", ctrl_positions)
@@ -37,14 +60,19 @@ class ResidualPredictor(nn.Module):
                 return lr
 
     def plot_residual(self, output_folder='.'):
-        residuals = np.degrees(self.residuals[0].detach().cpu().numpy())
+        residuals = np.degrees(
+            self._apply_bound(self.residuals[0]).detach().cpu().numpy()
+        )
+        sweep_error = math.degrees(
+            float(self.effective_sweep_error(0).detach().cpu())
+        )
         ctrl_positions = self.ctrl_positions.detach().cpu().numpy()
 
         plt.figure(figsize=(10, 5))
         plt.plot(ctrl_positions, -residuals, marker='o', linestyle='-', color='r')
         plt.xlabel('Control Point (Normalized Time)')
         plt.ylabel('Residual Value (degree)')
-        plt.title('Residuals over Control Points')
+        plt.title(f'Residuals over Control Points; sweep={sweep_error:.4f} deg')
         plt.savefig(f"{output_folder}/graph/residual.png")
         plt.close()
 
@@ -59,7 +87,26 @@ class ResidualPredictor(nn.Module):
         else:
             loaded_iter = iteration
         weights_path = os.path.join(model_path, "residual_predictor/iteration_{}/residual_predictor.pth".format(loaded_iter))
-        self.load_state_dict(torch.load(weights_path))
+        state_dict = torch.load(weights_path, map_location=self.residuals.device)
+        self.load_state_dict(state_dict, strict=False)
+
+    def effective_sweep_error(self, cam_idx: int):
+        raw_error = self.sweep_error[cam_idx]
+        if self.max_sweep_error_rad <= 0:
+            return raw_error.new_zeros(())
+        limit = self.max_sweep_error_rad
+        return limit * torch.tanh(raw_error / limit)
+
+    def angle_correction(
+        self,
+        time: torch.Tensor,
+        cam_idx: int,
+        use_local_residual: bool,
+    ):
+        correction = time * self.effective_sweep_error(cam_idx)
+        if use_local_residual:
+            correction = correction + self.forward(time, cam_idx)
+        return correction
 
     def forward(self, time: torch.Tensor, cam_idx:int):
         segment_idx = torch.bucketize(time, self.ctrl_positions[1:], right=False)
@@ -73,6 +120,13 @@ class ResidualPredictor(nn.Module):
         alpha = (time - t0) / (t1 - t0 + 1e-8)
         residual_t = (1 - alpha) * r0 + alpha * r1
 
-        return residual_t
+        return self._apply_bound(residual_t)
+
+    def _apply_bound(self, residual: torch.Tensor) -> torch.Tensor:
+        if self.max_residual_angle_rad is None:
+            return residual
+
+        limit = self.max_residual_angle_rad
+        return limit * torch.tanh(residual / limit)
 
     

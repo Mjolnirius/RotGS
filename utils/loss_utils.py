@@ -41,6 +41,24 @@ class FusedSSIMMap(torch.autograd.Function):
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
 
+def masked_l1_loss(network_output, gt, mask, eps=1e-8):
+    """L1 normalized by the number of masked pixels, not the full image."""
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    mask = mask.to(device=network_output.device, dtype=network_output.dtype)
+    weighted_error = torch.abs(network_output - gt) * mask
+    denominator = mask.sum() * network_output.shape[-3]
+    return weighted_error.sum() / denominator.clamp_min(eps)
+
+def masked_psnr(network_output, gt, mask, eps=1e-12):
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    mask = mask.to(device=network_output.device, dtype=network_output.dtype)
+    squared_error = (network_output - gt).square() * mask
+    denominator = mask.sum() * network_output.shape[-3]
+    mse_value = squared_error.sum() / denominator.clamp_min(eps)
+    return 20 * torch.log10(1.0 / torch.sqrt(mse_value.clamp_min(eps)))
+
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 

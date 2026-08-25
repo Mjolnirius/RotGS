@@ -129,23 +129,47 @@ def getWorld2View2_torch(R: torch.Tensor, t: torch.Tensor, translate: torch.Tens
     Rt = torch.linalg.inv(C2W)
     return Rt.float()
 
-def getProjectionMatrix(znear, zfar, fovX, fovY):
-    tanHalfFovY = math.tan((fovY / 2))
-    tanHalfFovX = math.tan((fovX / 2))
-
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
+def getProjectionMatrix(
+    znear,
+    zfar,
+    fovX=None,
+    fovY=None,
+    *,
+    fx=None,
+    fy=None,
+    cx=None,
+    cy=None,
+    width=None,
+    height=None,
+):
+    """Build a centered-FoV or full off-center pinhole projection matrix."""
+    use_intrinsics = all(
+        value is not None for value in (fx, fy, cx, cy, width, height)
+    )
+    if use_intrinsics:
+        if fx <= 0 or fy <= 0 or width <= 0 or height <= 0:
+            raise ValueError("focal lengths and image dimensions must be positive")
+    else:
+        if fovX is None or fovY is None:
+            raise ValueError("either full intrinsics or both fovX and fovY are required")
+        tanHalfFovY = math.tan(fovY / 2)
+        tanHalfFovX = math.tan(fovX / 2)
 
     P = torch.zeros(4, 4)
 
     z_sign = 1.0
 
-    P[0, 0] = 2.0 * znear / (right - left)
-    P[1, 1] = 2.0 * znear / (top - bottom)
-    P[0, 2] = (right + left) / (right - left)
-    P[1, 2] = (top + bottom) / (top - bottom)
+    if use_intrinsics:
+        P[0, 0] = 2.0 * fx / width
+        P[1, 1] = 2.0 * fy / height
+        # Match cuda_rasterizer::ndc2Pix: ((ndc + 1) * size - 1) / 2.
+        P[0, 2] = (2.0 * cx + 1.0) / width - 1.0
+        P[1, 2] = (2.0 * cy + 1.0) / height - 1.0
+    else:
+        P[0, 0] = 1.0 / tanHalfFovX
+        P[1, 1] = 1.0 / tanHalfFovY
+        P[0, 2] = 0.0
+        P[1, 2] = 0.0
     P[3, 2] = z_sign
     P[2, 2] = z_sign * zfar / (zfar - znear)
     P[2, 3] = -(zfar * znear) / (zfar - znear)

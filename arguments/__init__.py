@@ -57,6 +57,9 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = True
+        self.angle_noise_std = 0.0
+        self.rotation_direction = -1
+        self.legacy_centered_projection = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -79,6 +82,10 @@ class OptimizationParams(ParamGroup):
         self.center_axis_lr_init =  1e-2
         self.center_axis_lr_final = 1e-10
         self.center_axis_lr_max_steps = 12_000
+        self.axis_lr_init = 5e-4
+        self.axis_lr_final = 1e-8
+        self.center_lr_init = 1e-4
+        self.center_lr_final = 1e-8
         self.position_lr_init = 0.00016 
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -97,9 +104,14 @@ class OptimizationParams(ParamGroup):
         self.exposure_lr_delay_mult = 0.0
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
+        self.lambda_foreground_rgb = 1.0
+        self.lambda_full_rgb = 0.1
+        self.lambda_alpha = 0.1
+        self.lambda_center_reg = 0.01
+        self.ssim_crop_padding = 8
         self.lambda_flow = 0.5
         self.flow_schedule_lambda = 3
-        self.flow_downsampling = 4
+        self.flow_downsampling = 2
         self.densification_interval = 300
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500

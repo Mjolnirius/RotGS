@@ -46,12 +46,32 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
         if self.fixed_camera :
+            angle_noise_std = getattr(args, "angle_noise_std", 0.0)
+            rotation_direction = getattr(args, "rotation_direction", -1)
             if self.multi_camera:
                 print("Multiple cameras system !")
-                scene_info = sceneLoadTypeCallbacks["Multi"](args.source_path, args.images, args.eval, args.train_test_exp, random_init, eval_mode=eval_mode)
+                scene_info = sceneLoadTypeCallbacks["Multi"](
+                    args.source_path,
+                    args.images,
+                    args.eval,
+                    args.train_test_exp,
+                    random_init,
+                    eval_mode=eval_mode,
+                    angle_noise_std=angle_noise_std,
+                    rotation_direction=rotation_direction,
+                )
             else:
                 print("use Fixed Monocular CAMERA !")
-                scene_info = sceneLoadTypeCallbacks["Fixed"](args.source_path, args.images, args.eval, args.train_test_exp, random_init, eval_mode=eval_mode)
+                scene_info = sceneLoadTypeCallbacks["Fixed"](
+                    args.source_path,
+                    args.images,
+                    args.eval,
+                    args.train_test_exp,
+                    random_init,
+                    eval_mode=eval_mode,
+                    angle_noise_std=angle_noise_std,
+                    rotation_direction=rotation_direction,
+                )
             gaussians.distance = scene_info.distance
         else:
             print("use Moving Monocular CAMERA !")

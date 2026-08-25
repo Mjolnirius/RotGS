@@ -11,6 +11,7 @@
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 from utils.general_utils import PILtoTorch
@@ -18,6 +19,7 @@ from utils.general_utils import PILtoTorch
 class Camera(nn.Module):
     def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image,
                  alpha_mask, image_name, uid, time, rotation_angle, cam_idx=0, flow_idx=None,
+                 fx=None, fy=None, cx=None, cy=None,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",  
                  train_test_exp = False, is_test_dataset = False, is_test_view = False
                  ):
@@ -29,6 +31,10 @@ class Camera(nn.Module):
         self.T = T
         self.FoVx = FoVx
         self.FoVy = FoVy
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
         self.image_name = image_name
         self.time = time
         self.rotation_angle = rotation_angle
@@ -58,8 +64,24 @@ class Camera(nn.Module):
         self.depth_reliable = False
         
         if alpha_mask is not None:
-            alpha_mask_tensor = torch.from_numpy(alpha_mask).float().to("cuda")
-            self.alpha_mask = (alpha_mask_tensor > 0).float()
+            alpha_mask_tensor = torch.from_numpy(alpha_mask).float()
+            if alpha_mask_tensor.shape != (self.image_height, self.image_width):
+                alpha_mask_tensor = F.interpolate(
+                    alpha_mask_tensor[None, None],
+                    size=(self.image_height, self.image_width),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0]
+            self.alpha_mask = alpha_mask_tensor.clamp(0.0, 1.0).to(self.data_device)
+            mask_pixels = torch.nonzero(self.alpha_mask > 0.001, as_tuple=False)
+            if mask_pixels.numel() > 0:
+                y0, x0 = mask_pixels.min(dim=0).values.tolist()
+                y1, x1 = (mask_pixels.max(dim=0).values + 1).tolist()
+                self.foreground_bbox = (int(x0), int(y0), int(x1), int(y1))
+            else:
+                self.foreground_bbox = (0, 0, self.image_width, self.image_height)
+        else:
+            self.foreground_bbox = (0, 0, self.image_width, self.image_height)
 
         self.zfar = 100.0
         self.znear = 0.01
@@ -68,7 +90,18 @@ class Camera(nn.Module):
         self.scale = scale
 
         self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
+        self.projection_matrix = getProjectionMatrix(
+            znear=self.znear,
+            zfar=self.zfar,
+            fovX=self.FoVx,
+            fovY=self.FoVy,
+            fx=self.fx,
+            fy=self.fy,
+            cx=self.cx,
+            cy=self.cy,
+            width=self.image_width,
+            height=self.image_height,
+        ).transpose(0, 1).to(self.data_device)
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         

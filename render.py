@@ -44,12 +44,12 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
         if fixed_camera:
             coarse_angle = view.rotation_angle.clone().detach().unsqueeze(0).to('cuda')
-            if wo_tiny is False:
-                time_tensor = torch.tensor(view.time, dtype=torch.float).to('cuda')
-                residual = residual_predictor(time_tensor, view.cam_idx)
-                angle = coarse_angle + residual
-            else:
-                angle = coarse_angle
+            time_tensor = torch.tensor(view.time, dtype=torch.float).to('cuda')
+            angle = coarse_angle + residual_predictor.angle_correction(
+                time_tensor,
+                view.cam_idx,
+                use_local_residual=not wo_tiny,
+            )
 
             axis = gaussians.get_axis(view.cam_idx)
             center = gaussians.get_center(view.cam_idx)
@@ -73,18 +73,34 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             number_of_cameras = len(camera_dir)
         else:
             number_of_cameras = 1
-        gaussians = GaussianModel(dataset.sh_degree, fixed_camera=args.fixed_camera, multi_camera=args.multi_camera, number_of_cameras=number_of_cameras)
+        gaussians = GaussianModel(
+            dataset.sh_degree,
+            fixed_camera=args.fixed_camera,
+            multi_camera=args.multi_camera,
+            number_of_cameras=number_of_cameras,
+            axis_mode=getattr(args, "axis_mode", "free"),
+            axis_tilt_init_deg=getattr(args, "axis_tilt_init_deg", 30.0),
+            axis_tilt_min_deg=getattr(args, "axis_tilt_min_deg", 0.0),
+            axis_tilt_max_deg=getattr(args, "axis_tilt_max_deg", 90.0),
+            axis_side_limit_deg=getattr(args, "axis_side_limit_deg", 5.0),
+            center_max_offset=getattr(args, "center_max_offset", 0.25),
+            center_warmup_iterations=getattr(args, "center_warmup_iterations", 2000),
+        )
         scene = Scene(dataset, gaussians, args.fixed_camera, load_iteration=iteration, shuffle=False, random_init=True, multi_camera=args.multi_camera, eval_mode=True)
-        residual_predictor = ResidualPredictor(number_of_cameras)
-        residual_predictor.load_weights(dataset.model_path)
+        residual_predictor = ResidualPredictor(
+            number_of_cameras,
+            max_residual_angle_deg=getattr(args, "max_residual_angle_deg", 0.0),
+            max_sweep_error_deg=getattr(args, "max_sweep_error_deg", 0.0),
+        )
+        residual_predictor.load_weights(dataset.model_path, iteration=scene.loaded_iter)
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, args.fixed_camera, residual_predictor, args.wo_tiny)
+             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, args.fixed_camera, residual_predictor, getattr(args, "wo_tiny", False))
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, args.fixed_camera, residual_predictor, args.wo_tiny)
+             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, args.fixed_camera, residual_predictor, getattr(args, "wo_tiny", False))
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -97,7 +113,25 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--fixed_camera", action="store_true", default=True, help="Fix camera position")
     parser.add_argument("--moving_camera", action="store_true", default=False, help="Moving camera position")
-    parser.add_argument("--wo_tiny", action="store_true", help="without tiny angle")
+    parser.add_argument("--wo_tiny", action="store_true", default=None, help="without tiny angle")
+    parser.add_argument(
+        "--max_residual_angle_deg",
+        type=float,
+        default=None,
+        help="bound residual angle correction to +/- this many degrees; 0 keeps the original unbounded behavior",
+    )
+    parser.add_argument("--max_sweep_error_deg", type=float, default=None)
+    parser.add_argument(
+        "--axis_mode",
+        choices=("free", "bounded_tilt"),
+        default=None,
+    )
+    parser.add_argument("--axis_tilt_init_deg", type=float, default=None)
+    parser.add_argument("--axis_tilt_min_deg", type=float, default=None)
+    parser.add_argument("--axis_tilt_max_deg", type=float, default=None)
+    parser.add_argument("--axis_side_limit_deg", type=float, default=None)
+    parser.add_argument("--center_max_offset", type=float, default=None)
+    parser.add_argument("--center_warmup_iterations", type=int, default=None)
     parser.add_argument("--multi_camera", action="store_true", default=False, help="multi-camera system")
     parser.add_argument('--name', type=str, default='random', help='Output folder name')
 

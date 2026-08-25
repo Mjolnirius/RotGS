@@ -1,0 +1,481 @@
+{
+  "input_folder": "C:\\Users\\Thor\\gitreps_SwissEP\\datasets\\orbitvu_wd\\pub_data\\Schnaps_klein",
+  "input_cameras_file": "C:\\Users\\Thor\\gitreps_SwissEP\\RotGS\\datasets\\alphashot\\session2\\cameras.txt",
+  "input_cameras_sha256": "a6a2506c886e87930da75da6cd2325b461f6b8ad39945d025b35128f9920e16c",
+  "image_count": 73,
+  "angles_degrees": [
+    0,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30,
+    35,
+    40,
+    45,
+    50,
+    55,
+    60,
+    65,
+    70,
+    75,
+    80,
+    85,
+    90,
+    95,
+    100,
+    105,
+    110,
+    115,
+    120,
+    125,
+    130,
+    135,
+    140,
+    145,
+    150,
+    155,
+    160,
+    165,
+    170,
+    175,
+    180,
+    185,
+    190,
+    195,
+    200,
+    205,
+    210,
+    215,
+    220,
+    225,
+    230,
+    235,
+    240,
+    245,
+    250,
+    255,
+    260,
+    265,
+    270,
+    275,
+    280,
+    285,
+    290,
+    295,
+    300,
+    305,
+    310,
+    315,
+    320,
+    325,
+    330,
+    335,
+    340,
+    345,
+    350,
+    355,
+    360
+  ],
+  "angle_token_from_right": 0,
+  "renamed_images": [
+    {
+      "source": "Schnaps_klein_1_0.jpg",
+      "angle_degrees": 0,
+      "output": "0000.png"
+    },
+    {
+      "source": "Schnaps_klein_2_5.jpg",
+      "angle_degrees": 5,
+      "output": "0001.png"
+    },
+    {
+      "source": "Schnaps_klein_3_10.jpg",
+      "angle_degrees": 10,
+      "output": "0002.png"
+    },
+    {
+      "source": "Schnaps_klein_4_15.jpg",
+      "angle_degrees": 15,
+      "output": "0003.png"
+    },
+    {
+      "source": "Schnaps_klein_5_20.jpg",
+      "angle_degrees": 20,
+      "output": "0004.png"
+    },
+    {
+      "source": "Schnaps_klein_6_25.jpg",
+      "angle_degrees": 25,
+      "output": "0005.png"
+    },
+    {
+      "source": "Schnaps_klein_7_30.jpg",
+      "angle_degrees": 30,
+      "output": "0006.png"
+    },
+    {
+      "source": "Schnaps_klein_8_35.jpg",
+      "angle_degrees": 35,
+      "output": "0007.png"
+    },
+    {
+      "source": "Schnaps_klein_9_40.jpg",
+      "angle_degrees": 40,
+      "output": "0008.png"
+    },
+    {
+      "source": "Schnaps_klein_10_45.jpg",
+      "angle_degrees": 45,
+      "output": "0009.png"
+    },
+    {
+      "source": "Schnaps_klein_11_50.jpg",
+      "angle_degrees": 50,
+      "output": "0010.png"
+    },
+    {
+      "source": "Schnaps_klein_12_55.jpg",
+      "angle_degrees": 55,
+      "output": "0011.png"
+    },
+    {
+      "source": "Schnaps_klein_13_60.jpg",
+      "angle_degrees": 60,
+      "output": "0012.png"
+    },
+    {
+      "source": "Schnaps_klein_14_65.jpg",
+      "angle_degrees": 65,
+      "output": "0013.png"
+    },
+    {
+      "source": "Schnaps_klein_15_70.jpg",
+      "angle_degrees": 70,
+      "output": "0014.png"
+    },
+    {
+      "source": "Schnaps_klein_16_75.jpg",
+      "angle_degrees": 75,
+      "output": "0015.png"
+    },
+    {
+      "source": "Schnaps_klein_17_80.jpg",
+      "angle_degrees": 80,
+      "output": "0016.png"
+    },
+    {
+      "source": "Schnaps_klein_18_85.jpg",
+      "angle_degrees": 85,
+      "output": "0017.png"
+    },
+    {
+      "source": "Schnaps_klein_19_90.jpg",
+      "angle_degrees": 90,
+      "output": "0018.png"
+    },
+    {
+      "source": "Schnaps_klein_20_95.jpg",
+      "angle_degrees": 95,
+      "output": "0019.png"
+    },
+    {
+      "source": "Schnaps_klein_21_100.jpg",
+      "angle_degrees": 100,
+      "output": "0020.png"
+    },
+    {
+      "source": "Schnaps_klein_22_105.jpg",
+      "angle_degrees": 105,
+      "output": "0021.png"
+    },
+    {
+      "source": "Schnaps_klein_23_110.jpg",
+      "angle_degrees": 110,
+      "output": "0022.png"
+    },
+    {
+      "source": "Schnaps_klein_24_115.jpg",
+      "angle_degrees": 115,
+      "output": "0023.png"
+    },
+    {
+      "source": "Schnaps_klein_25_120.jpg",
+      "angle_degrees": 120,
+      "output": "0024.png"
+    },
+    {
+      "source": "Schnaps_klein_26_125.jpg",
+      "angle_degrees": 125,
+      "output": "0025.png"
+    },
+    {
+      "source": "Schnaps_klein_27_130.jpg",
+      "angle_degrees": 130,
+      "output": "0026.png"
+    },
+    {
+      "source": "Schnaps_klein_28_135.jpg",
+      "angle_degrees": 135,
+      "output": "0027.png"
+    },
+    {
+      "source": "Schnaps_klein_29_140.jpg",
+      "angle_degrees": 140,
+      "output": "0028.png"
+    },
+    {
+      "source": "Schnaps_klein_30_145.jpg",
+      "angle_degrees": 145,
+      "output": "0029.png"
+    },
+    {
+      "source": "Schnaps_klein_31_150.jpg",
+      "angle_degrees": 150,
+      "output": "0030.png"
+    },
+    {
+      "source": "Schnaps_klein_32_155.jpg",
+      "angle_degrees": 155,
+      "output": "0031.png"
+    },
+    {
+      "source": "Schnaps_klein_33_160.jpg",
+      "angle_degrees": 160,
+      "output": "0032.png"
+    },
+    {
+      "source": "Schnaps_klein_34_165.jpg",
+      "angle_degrees": 165,
+      "output": "0033.png"
+    },
+    {
+      "source": "Schnaps_klein_35_170.jpg",
+      "angle_degrees": 170,
+      "output": "0034.png"
+    },
+    {
+      "source": "Schnaps_klein_36_175.jpg",
+      "angle_degrees": 175,
+      "output": "0035.png"
+    },
+    {
+      "source": "Schnaps_klein_37_180.jpg",
+      "angle_degrees": 180,
+      "output": "0036.png"
+    },
+    {
+      "source": "Schnaps_klein_38_185.jpg",
+      "angle_degrees": 185,
+      "output": "0037.png"
+    },
+    {
+      "source": "Schnaps_klein_39_190.jpg",
+      "angle_degrees": 190,
+      "output": "0038.png"
+    },
+    {
+      "source": "Schnaps_klein_40_195.jpg",
+      "angle_degrees": 195,
+      "output": "0039.png"
+    },
+    {
+      "source": "Schnaps_klein_41_200.jpg",
+      "angle_degrees": 200,
+      "output": "0040.png"
+    },
+    {
+      "source": "Schnaps_klein_42_205.jpg",
+      "angle_degrees": 205,
+      "output": "0041.png"
+    },
+    {
+      "source": "Schnaps_klein_43_210.jpg",
+      "angle_degrees": 210,
+      "output": "0042.png"
+    },
+    {
+      "source": "Schnaps_klein_44_215.jpg",
+      "angle_degrees": 215,
+      "output": "0043.png"
+    },
+    {
+      "source": "Schnaps_klein_45_220.jpg",
+      "angle_degrees": 220,
+      "output": "0044.png"
+    },
+    {
+      "source": "Schnaps_klein_46_225.jpg",
+      "angle_degrees": 225,
+      "output": "0045.png"
+    },
+    {
+      "source": "Schnaps_klein_47_230.jpg",
+      "angle_degrees": 230,
+      "output": "0046.png"
+    },
+    {
+      "source": "Schnaps_klein_48_235.jpg",
+      "angle_degrees": 235,
+      "output": "0047.png"
+    },
+    {
+      "source": "Schnaps_klein_49_240.jpg",
+      "angle_degrees": 240,
+      "output": "0048.png"
+    },
+    {
+      "source": "Schnaps_klein_50_245.jpg",
+      "angle_degrees": 245,
+      "output": "0049.png"
+    },
+    {
+      "source": "Schnaps_klein_51_250.jpg",
+      "angle_degrees": 250,
+      "output": "0050.png"
+    },
+    {
+      "source": "Schnaps_klein_52_255.jpg",
+      "angle_degrees": 255,
+      "output": "0051.png"
+    },
+    {
+      "source": "Schnaps_klein_53_260.jpg",
+      "angle_degrees": 260,
+      "output": "0052.png"
+    },
+    {
+      "source": "Schnaps_klein_54_265.jpg",
+      "angle_degrees": 265,
+      "output": "0053.png"
+    },
+    {
+      "source": "Schnaps_klein_55_270.jpg",
+      "angle_degrees": 270,
+      "output": "0054.png"
+    },
+    {
+      "source": "Schnaps_klein_56_275.jpg",
+      "angle_degrees": 275,
+      "output": "0055.png"
+    },
+    {
+      "source": "Schnaps_klein_57_280.jpg",
+      "angle_degrees": 280,
+      "output": "0056.png"
+    },
+    {
+      "source": "Schnaps_klein_58_285.jpg",
+      "angle_degrees": 285,
+      "output": "0057.png"
+    },
+    {
+      "source": "Schnaps_klein_59_290.jpg",
+      "angle_degrees": 290,
+      "output": "0058.png"
+    },
+    {
+      "source": "Schnaps_klein_60_295.jpg",
+      "angle_degrees": 295,
+      "output": "0059.png"
+    },
+    {
+      "source": "Schnaps_klein_61_300.jpg",
+      "angle_degrees": 300,
+      "output": "0060.png"
+    },
+    {
+      "source": "Schnaps_klein_62_305.jpg",
+      "angle_degrees": 305,
+      "output": "0061.png"
+    },
+    {
+      "source": "Schnaps_klein_63_310.jpg",
+      "angle_degrees": 310,
+      "output": "0062.png"
+    },
+    {
+      "source": "Schnaps_klein_64_315.jpg",
+      "angle_degrees": 315,
+      "output": "0063.png"
+    },
+    {
+      "source": "Schnaps_klein_65_320.jpg",
+      "angle_degrees": 320,
+      "output": "0064.png"
+    },
+    {
+      "source": "Schnaps_klein_66_325.jpg",
+      "angle_degrees": 325,
+      "output": "0065.png"
+    },
+    {
+      "source": "Schnaps_klein_67_330.jpg",
+      "angle_degrees": 330,
+      "output": "0066.png"
+    },
+    {
+      "source": "Schnaps_klein_68_335.jpg",
+      "angle_degrees": 335,
+      "output": "0067.png"
+    },
+    {
+      "source": "Schnaps_klein_69_340.jpg",
+      "angle_degrees": 340,
+      "output": "0068.png"
+    },
+    {
+      "source": "Schnaps_klein_70_345.jpg",
+      "angle_degrees": 345,
+      "output": "0069.png"
+    },
+    {
+      "source": "Schnaps_klein_71_350.jpg",
+      "angle_degrees": 350,
+      "output": "0070.png"
+    },
+    {
+      "source": "Schnaps_klein_72_355.jpg",
+      "angle_degrees": 355,
+      "output": "0071.png"
+    },
+    {
+      "source": "Schnaps_klein_1_360.jpg",
+      "angle_degrees": 360,
+      "output": "0072.png"
+    }
+  ],
+  "source_size": [
+    6751,
+    4501
+  ],
+  "product_selection_left_top_right_bottom": [
+    2455,
+    2480,
+    4241,
+    4126
+  ],
+  "crop_mode": "smallest_square",
+  "crop_box_left_top_right_bottom": [
+    2455,
+    2410,
+    4241,
+    4196
+  ],
+  "crop_size": [
+    1786,
+    1786
+  ],
+  "output_size": [
+    540,
+    540
+  ],
+  "background_threshold_lab": 12.0,
+  "segmentation_max_width": 1600,
+  "alpha_nonzero_fraction": {
+    "mean": 0.13433075896799895,
+    "minimum": 0.1046124828532236,
+    "maximum": 0.14984910836762688
+  }
+}
