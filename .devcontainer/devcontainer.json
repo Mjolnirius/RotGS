@@ -1,0 +1,31 @@
+{
+  "name": "RotGS CUDA 12.8",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  "runArgs": [
+    "--gpus",
+    "all"
+  ],
+
+  "containerEnv": {
+    "CUDA_HOME": "/usr/local/cuda",
+    "TORCH_CUDA_ARCH_LIST": "12.0",
+    "UV_CACHE_DIR": "/srv/cache/uv"
+  },
+
+  "mounts": [
+    "source=/shared,target=/shared,type=bind",
+    "source=/srv/work/users/thorbjoern,target=/srv/work/users/thorbjoern,type=bind",
+    "source=/srv/scratch/thorbjoern,target=/srv/scratch/thorbjoern,type=bind",
+    "source=/srv/cache/uv,target=/srv/cache/uv,type=bind",
+    "source=/home/thorbjoern/.ssh,target=/home/thorbjoern/.ssh,type=bind,readonly"
+  ],
+
+  "workspaceFolder": "/workspaces/RotGS",
+
+  "remoteUser": "thorbjoern",
+
+  "postCreateCommand": "uv sync"
+}
