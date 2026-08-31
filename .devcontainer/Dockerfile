@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS rotgs-base
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -63,3 +63,52 @@ ENV UV_LINK_MODE=copy
 
 USER ${USERNAME}
 WORKDIR /workspaces/RotGS
+
+# Optional browser-accessible Linux desktop. This target deliberately extends
+# the same RotGS base used by the standard development container.
+FROM rotgs-base AS gui
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    dbus-x11 \
+    libegl1 \
+    libgl1-mesa-dri \
+    libfontconfig1 \
+    libsm6 \
+    libx11-xcb1 \
+    libxext6 \
+    libxkbcommon-x11-0 \
+    libxrender1 \
+    libxcb-cursor0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-xinerama0 \
+    libxcb-xfixes0 \
+    mesa-utils \
+    novnc \
+    websockify \
+    x11-utils \
+    x11vnc \
+    xauth \
+    xfce4 \
+    xfce4-terminal \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY start-gui.sh /usr/local/bin/start-rotgs-gui
+RUN chmod 0755 /usr/local/bin/start-rotgs-gui
+
+ENV DISPLAY=:1
+ENV QT_X11_NO_MITSHM=1
+
+USER ${USERNAME}
+WORKDIR /workspaces/RotGS
+
+# Keep this target last so Docker clients that do not specify a target retain
+# the original lightweight behavior.
+FROM rotgs-base AS standard

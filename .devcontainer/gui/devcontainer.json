@@ -1,8 +1,9 @@
 {
-  "name": "RotGS CUDA 12.8",
+  "name": "RotGS CUDA 12.8 + GUI",
   "build": {
-    "dockerfile": "Dockerfile",
-    "target": "standard"
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "gui"
   },
 
   "runArgs": [
@@ -13,7 +14,9 @@
   "containerEnv": {
     "CUDA_HOME": "/usr/local/cuda",
     "TORCH_CUDA_ARCH_LIST": "12.0",
-    "UV_CACHE_DIR": "/srv/cache/uv"
+    "UV_CACHE_DIR": "/srv/cache/uv",
+    "DISPLAY": ":1",
+    "QT_X11_NO_MITSHM": "1"
   },
 
   "mounts": [
@@ -28,5 +31,15 @@
 
   "remoteUser": "thorbjoern",
 
-  "postCreateCommand": "uv sync"
+  "forwardPorts": [6080],
+
+  "portsAttributes": {
+    "6080": {
+      "label": "RotGS noVNC desktop",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "postCreateCommand": "uv sync",
+  "postStartCommand": "/usr/local/bin/start-rotgs-gui"
 }
