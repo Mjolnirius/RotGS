@@ -31,6 +31,11 @@
     button:disabled { opacity: .45; cursor: default; }
     #threshold-wrap { display: inline-flex; align-items: center; gap: 8px; }
     #threshold { min-width: 70px; text-align: center; font-variant-numeric: tabular-nums; }
+    #resolution-wrap { display: inline-flex; align-items: center; gap: 8px; padding: 5px 9px; border: 1px solid #3b414f; border-radius: 7px; background: #20242d; }
+    #final-width { width: 88px; border: 1px solid #566178; border-radius: 5px; padding: 6px 7px; background: #11151c; color: inherit; font: inherit; font-variant-numeric: tabular-nums; }
+    #final-width.invalid { border-color: #e25b67; outline: 1px solid #e25b67; }
+    #resolution-info { color: #b9c1d0; font-size: 13px; font-variant-numeric: tabular-nums; }
+    #use-max { padding: 6px 9px; }
     [hidden] { display: none !important; }
     @media (max-width: 850px) { #review-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   </style>
@@ -46,6 +51,7 @@
   <footer>
     <button id="reselect" hidden>Redraw ROI (R)</button>
     <span id="threshold-wrap" hidden><button id="include">[ Include more</button><span id="threshold"></span><button id="exclude">] Include less</button></span>
+    <span id="resolution-wrap" hidden><label for="final-width">Final width</label><input id="final-width" type="number" min="1" step="1" inputmode="numeric"><span>px</span><button id="use-max" type="button">Use max</button><span id="resolution-info"></span></span>
     <button class="primary" id="continue" disabled>Continue</button>
     <button class="danger" id="cancel">Cancel (Esc)</button>
   </footer>
@@ -56,14 +62,25 @@ const canvas = document.getElementById("selection-canvas"), ctx = canvas.getCont
 const singleViewer = document.getElementById("single-viewer"), reviewGrid = document.getElementById("review-grid");
 const preview = document.getElementById("preview"), instruction = document.getElementById("instruction"), status = document.getElementById("status");
 const continueButton = document.getElementById("continue"), reselectButton = document.getElementById("reselect"), thresholdWrap = document.getElementById("threshold-wrap"), thresholdText = document.getElementById("threshold");
+const resolutionWrap = document.getElementById("resolution-wrap"), finalWidthInput = document.getElementById("final-width"), resolutionInfo = document.getElementById("resolution-info"), useMaxButton = document.getElementById("use-max");
 const source = new Image();
-let config = null, selection = null, dragStart = null, draggedEdge = null, stage = "select", threshold = 12, busy = false;
+let config = null, selection = null, dragStart = null, dragOperation = null, stage = "select", threshold = 12, busy = false;
+let nativeCropSize = null, widthTracksNative = true;
 let comparisonViews = [];
 
+function targetWidth() {
+  const value = Number(finalWidthInput.value);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+function validTargetWidth() {
+  const value = targetWidth();
+  return nativeCropSize !== null && value !== null && value <= nativeCropSize.width;
+}
 function setBusy(value, message = "") {
   busy = value; status.textContent = message;
-  continueButton.disabled = value || (stage === "select" && !selection);
+  continueButton.disabled = value || (stage === "select" && !selection) || (stage === "review" && !validTargetWidth());
   document.getElementById("include").disabled = value; document.getElementById("exclude").disabled = value; reselectButton.disabled = value;
+  finalWidthInput.disabled = value; useMaxButton.disabled = value;
 }
 function pointOn(target, event) {
   const rect = target.getBoundingClientRect();
@@ -72,24 +89,46 @@ function pointOn(target, event) {
 function normalizedBox(a, b) {
   return { left: Math.floor(Math.min(a.x, b.x) * config.source_width / canvas.width), top: Math.floor(Math.min(a.y, b.y) * config.source_height / canvas.height), right: Math.ceil(Math.max(a.x, b.x) * config.source_width / canvas.width), bottom: Math.ceil(Math.max(a.y, b.y) * config.source_height / canvas.height) };
 }
-function drawImageAndBox(target, context, image) {
+function drawImageAndBox(target, context, image, showCenterHandle = false) {
   context.clearRect(0, 0, target.width, target.height); context.drawImage(image, 0, 0, target.width, target.height);
   if (!selection) return;
   const left = selection.left * target.width / config.source_width, top = selection.top * target.height / config.source_height, right = selection.right * target.width / config.source_width, bottom = selection.bottom * target.height / config.source_height;
-  context.save(); context.fillStyle = "rgba(20,105,255,.12)"; context.strokeStyle = "#ff344d"; context.lineWidth = Math.max(2, target.width / 450); context.fillRect(left, top, right-left, bottom-top); context.strokeRect(left, top, right-left, bottom-top); context.restore();
+  context.save(); context.fillStyle = "rgba(20,105,255,.12)"; context.strokeStyle = "#ff344d"; context.lineWidth = Math.max(2, target.width / 450); context.fillRect(left, top, right-left, bottom-top); context.strokeRect(left, top, right-left, bottom-top);
+  if (showCenterHandle) { const centerX = (left + right) / 2, centerY = (top + bottom) / 2, radius = Math.max(5, target.width / 100); context.beginPath(); context.arc(centerX, centerY, radius, 0, Math.PI * 2); context.fillStyle = "rgba(20,105,255,.9)"; context.fill(); context.strokeStyle = "white"; context.lineWidth = 2; context.stroke(); }
+  context.restore();
 }
 function drawSelection() { drawImageAndBox(canvas, ctx, source); }
-function drawReview() { for (const view of comparisonViews) drawImageAndBox(view.canvas, view.context, view.image); }
+function drawReview() { comparisonViews.forEach((view, index) => drawImageAndBox(view.canvas, view.context, view.image, index === 0)); }
+
+function updateResolutionDisplay() {
+  const value = targetWidth(), valid = validTargetWidth();
+  finalWidthInput.classList.toggle("invalid", nativeCropSize !== null && !valid);
+  if (nativeCropSize === null) resolutionInfo.textContent = "Calculating crop resolution…";
+  else if (value === null) resolutionInfo.textContent = `Enter an integer from 1 to ${nativeCropSize.width}.`;
+  else if (value > nativeCropSize.width) resolutionInfo.textContent = `Maximum native width is ${nativeCropSize.width}px; upscaling is disabled.`;
+  else { const height = Math.max(1, Math.round(nativeCropSize.height * value / nativeCropSize.width)); resolutionInfo.textContent = `Output ${value}×${height}; native crop ${nativeCropSize.width}×${nativeCropSize.height}.`; }
+  setBusy(busy, status.textContent);
+}
+async function refreshSelectionInfo() {
+  if (!selection) return;
+  setBusy(true, "Updating crop resolution…");
+  try {
+    const data = await post("/api/selection-info", { selection });
+    nativeCropSize = { width: data.native_width, height: data.native_height };
+    if (widthTracksNative) finalWidthInput.value = data.native_width;
+    updateResolutionDisplay(); setBusy(false);
+  } catch (error) { setBusy(false, error.message); }
+}
 
 function showSelection() {
-  stage = "select"; singleViewer.hidden = false; canvas.hidden = false; reviewGrid.hidden = true; preview.hidden = true; reselectButton.hidden = true; thresholdWrap.hidden = true;
+  stage = "select"; singleViewer.hidden = false; canvas.hidden = false; reviewGrid.hidden = true; preview.hidden = true; reselectButton.hidden = true; thresholdWrap.hidden = true; resolutionWrap.hidden = true;
   continueButton.textContent = "Review six angles"; instruction.textContent = "Drag a tight rectangle around the product, then continue."; drawSelection(); setBusy(false);
 }
 async function setupComparisons() {
   if (comparisonViews.length) return;
   comparisonViews = config.comparisons.map(item => {
     const card = document.createElement("section"); card.className = "review-card checker";
-    const label = document.createElement("span"); label.className = "angle"; label.textContent = `${item.angle}°${item.index === 0 ? " — drag red edges" : ""}`;
+    const label = document.createElement("span"); label.className = "angle"; label.textContent = `${item.angle}°${item.index === 0 ? " — drag edges or blue center" : ""}`;
     const itemCanvas = document.createElement("canvas"); itemCanvas.width = item.display_width; itemCanvas.height = item.display_height;
     card.append(label, itemCanvas); reviewGrid.append(card);
     const image = new Image(); image.src = `/comparison/${item.index}.png`;
@@ -101,13 +140,13 @@ async function setupComparisons() {
 async function showReview() {
   setBusy(true, "Loading six review angles…");
   try {
-    await setupComparisons(); stage = "review"; singleViewer.hidden = true; reviewGrid.hidden = false; preview.hidden = true; reselectButton.hidden = false; thresholdWrap.hidden = true;
+    await setupComparisons(); stage = "review"; singleViewer.hidden = true; reviewGrid.hidden = false; preview.hidden = true; reselectButton.hidden = false; thresholdWrap.hidden = true; resolutionWrap.hidden = false;
     continueButton.textContent = config.overwrite_alpha_mask ? "Preview mask" : "Accept and process";
-    instruction.textContent = "Check all six angles. Drag any red edge in the first view; every view updates immediately."; drawReview(); setBusy(false);
+    instruction.textContent = "Check all six angles. Drag a red edge to resize or the blue center to move the box in the first view."; drawReview(); await refreshSelectionInfo();
   } catch (error) { setBusy(false, error.message); }
 }
 function showPreview() {
-  stage = "preview"; singleViewer.hidden = true; reviewGrid.hidden = true; preview.hidden = false; reselectButton.hidden = false; thresholdWrap.hidden = false;
+  stage = "preview"; singleViewer.hidden = true; reviewGrid.hidden = true; preview.hidden = false; reselectButton.hidden = false; thresholdWrap.hidden = false; resolutionWrap.hidden = true;
   thresholdText.textContent = `Threshold ${threshold}`; continueButton.textContent = "Accept and process";
   instruction.textContent = "Left: foreground on checkerboard. Right: generated alpha mask."; setBusy(false);
 }
@@ -117,7 +156,7 @@ async function post(path, payload = {}) {
 }
 async function requestPreview(nextThreshold = threshold) {
   if (!selection || busy) return; setBusy(true, "Generating segmentation preview…");
-  try { const data = await post("/api/preview", { selection, threshold: nextThreshold }); threshold = data.threshold; preview.src = `/preview.png?v=${data.version}`; await preview.decode(); showPreview(); }
+  try { const data = await post("/api/preview", { selection, threshold: nextThreshold, target_width: targetWidth() }); threshold = data.threshold; preview.src = `/preview.png?v=${data.version}`; await preview.decode(); showPreview(); }
   catch (error) { setBusy(false, error.message); }
 }
 async function accept() {
@@ -125,7 +164,7 @@ async function accept() {
   if (stage === "select") { await showReview(); return; }
   if (stage === "review" && config.overwrite_alpha_mask) { await requestPreview(); return; }
   setBusy(true, "Accepting selection…");
-  try { await post("/api/accept", stage === "review" ? { selection } : {}); instruction.textContent = "Accepted. Processing continues in the terminal."; status.textContent = "This page can be closed."; continueButton.hidden = true; reselectButton.hidden = true; thresholdWrap.hidden = true; }
+  try { await post("/api/accept", stage === "review" ? { selection, target_width: targetWidth() } : {}); instruction.textContent = "Accepted. Processing continues in the terminal."; status.textContent = "This page can be closed."; continueButton.hidden = true; reselectButton.hidden = true; thresholdWrap.hidden = true; resolutionWrap.hidden = true; }
   catch (error) { setBusy(false, error.message); }
 }
 
@@ -134,31 +173,36 @@ canvas.addEventListener("pointermove", event => { if (!dragStart || busy) return
 function finishInitialDrag(event) { if (!dragStart) return; selection = normalizedBox(dragStart, pointOn(canvas, event)); dragStart = null; if (selection.right <= selection.left || selection.bottom <= selection.top) selection = null; drawSelection(); setBusy(false); }
 canvas.addEventListener("pointerup", finishInitialDrag); canvas.addEventListener("pointercancel", () => { dragStart = null; });
 
-function edgeAt(target, event) {
+function dragOperationAt(target, event) {
   if (!selection) return null;
   const point = pointOn(target, event), rect = target.getBoundingClientRect(), hit = 14 * target.width / rect.width;
   const left = selection.left * target.width / config.source_width, right = selection.right * target.width / config.source_width, top = selection.top * target.height / config.source_height, bottom = selection.bottom * target.height / config.source_height;
   const candidates = [];
   if (point.y >= top-hit && point.y <= bottom+hit) candidates.push([Math.abs(point.x-left), "left"], [Math.abs(point.x-right), "right"]);
   if (point.x >= left-hit && point.x <= right+hit) candidates.push([Math.abs(point.y-top), "top"], [Math.abs(point.y-bottom), "bottom"]);
-  candidates.sort((a, b) => a[0] - b[0]); return candidates.length && candidates[0][0] <= hit ? candidates[0][1] : null;
+  candidates.sort((a, b) => a[0] - b[0]);
+  if (candidates.length && candidates[0][0] <= hit) return candidates[0][1];
+  return point.x > left && point.x < right && point.y > top && point.y < bottom ? "move" : null;
 }
 function installEdgeDragging(target) {
-  target.addEventListener("pointerdown", event => { if (busy || stage !== "review" || event.button !== 0) return; draggedEdge = edgeAt(target, event); if (draggedEdge) target.setPointerCapture(event.pointerId); });
+  target.addEventListener("pointerdown", event => { if (busy || stage !== "review" || event.button !== 0) return; const operation = dragOperationAt(target, event); if (!operation) return; const point = pointOn(target, event); dragOperation = { operation, startX: point.x * config.source_width / target.width, startY: point.y * config.source_height / target.height, initial: { ...selection } }; target.setPointerCapture(event.pointerId); target.style.cursor = operation === "move" ? "grabbing" : target.style.cursor; });
   target.addEventListener("pointermove", event => {
-    if (!draggedEdge) { const edge = edgeAt(target, event); target.style.cursor = edge === "left" || edge === "right" ? "ew-resize" : edge ? "ns-resize" : "default"; return; }
+    if (!dragOperation) { const operation = dragOperationAt(target, event); target.style.cursor = operation === "left" || operation === "right" ? "ew-resize" : operation === "top" || operation === "bottom" ? "ns-resize" : operation === "move" ? "grab" : "default"; return; }
     const point = pointOn(target, event), x = Math.round(point.x * config.source_width / target.width), y = Math.round(point.y * config.source_height / target.height);
-    if (draggedEdge === "left") selection.left = Math.max(0, Math.min(x, selection.right-1));
-    else if (draggedEdge === "right") selection.right = Math.min(config.source_width, Math.max(x, selection.left+1));
-    else if (draggedEdge === "top") selection.top = Math.max(0, Math.min(y, selection.bottom-1));
+    if (dragOperation.operation === "move") { const initial = dragOperation.initial, width = initial.right - initial.left, height = initial.bottom - initial.top, left = Math.max(0, Math.min(config.source_width - width, initial.left + Math.round(x - dragOperation.startX))), top = Math.max(0, Math.min(config.source_height - height, initial.top + Math.round(y - dragOperation.startY))); selection = { left, top, right: left + width, bottom: top + height }; }
+    else if (dragOperation.operation === "left") selection.left = Math.max(0, Math.min(x, selection.right-1));
+    else if (dragOperation.operation === "right") selection.right = Math.min(config.source_width, Math.max(x, selection.left+1));
+    else if (dragOperation.operation === "top") selection.top = Math.max(0, Math.min(y, selection.bottom-1));
     else selection.bottom = Math.min(config.source_height, Math.max(y, selection.top+1));
     drawReview();
   });
-  const stop = () => { draggedEdge = null; };
+  const stop = () => { if (!dragOperation) return; dragOperation = null; void refreshSelectionInfo(); };
   target.addEventListener("pointerup", stop); target.addEventListener("pointercancel", stop);
 }
 
 continueButton.addEventListener("click", () => void accept()); reselectButton.addEventListener("click", showSelection);
+finalWidthInput.addEventListener("input", () => { widthTracksNative = false; updateResolutionDisplay(); });
+useMaxButton.addEventListener("click", () => { if (!nativeCropSize) return; widthTracksNative = true; finalWidthInput.value = nativeCropSize.width; updateResolutionDisplay(); });
 document.getElementById("include").addEventListener("click", () => void requestPreview(Math.max(1, threshold - 2)));
 document.getElementById("exclude").addEventListener("click", () => void requestPreview(threshold + 2));
 document.getElementById("cancel").addEventListener("click", async () => { if (busy) return; setBusy(true, "Cancelling…"); try { await post("/api/cancel"); instruction.textContent = "Cancelled."; status.textContent = "Return to the terminal."; } catch (error) { setBusy(false, error.message); } });
@@ -170,7 +214,7 @@ window.addEventListener("keydown", event => {
   else if (event.key === "]" && stage === "preview") { event.preventDefault(); document.getElementById("exclude").click(); }
 });
 fetch("/api/config").then(response => response.json().then(data => ({ response, data }))).then(({ response, data }) => {
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); config = data; threshold = data.threshold; selection = data.initial_selection;
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); config = data; threshold = data.threshold; selection = data.initial_selection; widthTracksNative = data.target_width === null; if (data.target_width !== null) finalWidthInput.value = data.target_width;
   canvas.width = data.display_width; canvas.height = data.display_height; source.src = "/source.png"; source.onload = showSelection; source.onerror = () => { status.textContent = "Could not load source image."; };
 }).catch(error => { status.textContent = error.message; });
 </script>

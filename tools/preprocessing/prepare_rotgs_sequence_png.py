@@ -190,7 +190,7 @@ def _print_summary(summary: dict[str, Any]) -> None:
 def prepare_rotgs_sequence_png(
     folder_name: str | Path,
     cameras_file: str | Path,
-    target_width: int = 540,
+    target_width: int | None = None,
     *,
     selection: CropBox | None = None,
     background_threshold: float = 12.0,
@@ -211,7 +211,7 @@ def prepare_rotgs_sequence_png(
         raise ValueError(f"input path is not a folder: {input_folder}")
     if not input_cameras_file.is_file():
         raise ValueError(f"cameras path is not a file: {input_cameras_file}")
-    if target_width <= 0:
+    if target_width is not None and target_width <= 0:
         raise ValueError("target_width must be positive")
 
     if square_crop:
@@ -222,13 +222,6 @@ def prepare_rotgs_sequence_png(
         )
     else:
         output_suffix = SOURCE_ASPECT_OUTPUT_SUFFIX
-    output_name = f"{input_folder.name}{output_suffix}_{target_width}"
-    output_folder = input_folder.with_name(output_name)
-    if output_folder.exists():
-        raise FileExistsError(
-            f"output folder already exists; refusing to mix runs: {output_folder}"
-        )
-
     image_files = sorted(
         (
             path
@@ -322,7 +315,12 @@ def prepare_rotgs_sequence_png(
             overwrite_alpha_mask and confirm_segmentation
         )
         if needs_web_selection:
-            selection, crop_box, chosen_threshold = choose_processing_settings_web(
+            (
+                selection,
+                crop_box,
+                chosen_threshold,
+                resolved_target_width,
+            ) = choose_processing_settings_web(
                 first_image,
                 background_threshold,
                 segmentation_max_width,
@@ -332,16 +330,28 @@ def prepare_rotgs_sequence_png(
                 overwrite_alpha_mask,
                 port=web_port,
                 initial_selection=selection,
+                target_width=target_width,
                 comparison_images=comparison_images,
             )
         else:
             crop_box = crop_box_for_selection(selection, source_size, square_crop)
             chosen_threshold = background_threshold if overwrite_alpha_mask else None
+            crop_width = crop_box[2] - crop_box[0]
+            resolved_target_width = (
+                crop_width if target_width is None else target_width
+            )
     finally:
         first_image.close()
 
     crop_size = crop_box[2] - crop_box[0], crop_box[3] - crop_box[1]
-    output_size = calculate_output_size(crop_size, target_width)
+    output_size = calculate_output_size(crop_size, resolved_target_width)
+    output_name = f"{input_folder.name}{output_suffix}_{resolved_target_width}"
+    output_folder = input_folder.with_name(output_name)
+    if output_folder.exists():
+        raise FileExistsError(
+            "output folder already exists; refusing to mix runs: "
+            f"{output_folder}"
+        )
     product_box = _relative_product_box(selection, crop_box)
     updated_cameras_text = transform_camera_intrinsics(
         cameras_text,
@@ -411,9 +421,12 @@ def prepare_rotgs_sequence_png(
                     source_rgba.close()
 
             try:
-                # Pillow resamples RGBA through premultiplied RGBa for Lanczos,
-                # keeping color and the unthresholded alpha channel aligned.
-                resized = rgba.resize(output_size, Image.Resampling.LANCZOS)
+                if rgba.size == output_size:
+                    resized = rgba.copy()
+                else:
+                    # Pillow resamples RGBA through premultiplied RGBa for Lanczos,
+                    # keeping color and the unthresholded alpha channel aligned.
+                    resized = rgba.resize(output_size, Image.Resampling.LANCZOS)
             finally:
                 rgba.close()
 
@@ -552,8 +565,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Rename a 5-degree PNG sequence, crop it for RotGS, preserve its "
-            "source alpha by default or regenerate alpha, downscale, and update "
-            "cameras.txt."
+            "source alpha by default or regenerate alpha, optionally downscale, "
+            "and update cameras.txt."
         )
     )
     parser.add_argument("folder_name", help="folder containing source PNG files")
@@ -565,8 +578,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--width",
         type=int,
-        default=540,
-        help="final image width and, by default, height in pixels (default: 540)",
+        default=None,
+        help=(
+            "final image width in pixels; omit to preserve the selected crop's "
+            "native resolution"
+        ),
     )
     parser.add_argument(
         "--keep-source-aspect",

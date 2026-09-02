@@ -242,6 +242,18 @@ def _selection_from_payload(payload: object) -> CropBox:
     return values[0], values[1], values[2], values[3]
 
 
+def _target_width_from_payload(payload: object) -> int:
+    if isinstance(payload, bool) or not isinstance(payload, (int, float)):
+        raise ValueError("target_width must be an integer")
+    numeric_width = float(payload)
+    if not np.isfinite(numeric_width) or not numeric_width.is_integer():
+        raise ValueError("target_width must be an integer")
+    target_width = int(numeric_width)
+    if target_width <= 0:
+        raise ValueError("target_width must be positive")
+    return target_width
+
+
 @dataclass
 class WebSelectionState:
     image: Image.Image
@@ -251,18 +263,46 @@ class WebSelectionState:
     working_max_width: int
     maximum_display_size: tuple[int, int]
     initial_selection: CropBox | None = None
-    result: tuple[CropBox, CropBox, float | None] | None = None
+    target_width: int | None = None
+    result: tuple[CropBox, CropBox, float | None, int] | None = None
     cancelled: bool = False
     preview: bytes | None = None
     preview_version: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def preview_selection(self, selection: CropBox, threshold: float) -> dict[str, object]:
+    def selection_info(self, selection: CropBox) -> dict[str, object]:
+        crop_box = crop_box_for_selection(selection, self.image.size, self.square_crop)
+        crop_width = crop_box[2] - crop_box[0]
+        crop_height = crop_box[3] - crop_box[1]
+        return {
+            "crop_box": list(crop_box),
+            "native_width": crop_width,
+            "native_height": crop_height,
+        }
+
+    @staticmethod
+    def _validate_target_width(crop_box: CropBox, target_width: int) -> None:
+        if target_width <= 0:
+            raise ValueError("target_width must be positive")
+        crop_width = crop_box[2] - crop_box[0]
+        if target_width > crop_width:
+            raise ValueError(
+                f"target width {target_width} would upscale the "
+                f"{crop_width}-pixel crop"
+            )
+
+    def preview_selection(
+        self,
+        selection: CropBox,
+        threshold: float,
+        target_width: int,
+    ) -> dict[str, object]:
         if not self.overwrite_alpha_mask:
             raise ValueError("segmentation preview is unavailable in source-alpha mode")
         if not np.isfinite(threshold) or threshold <= 0:
             raise ValueError("threshold must be a positive finite number")
         crop_box = crop_box_for_selection(selection, self.image.size, self.square_crop)
+        self._validate_target_width(crop_box, target_width)
         product_box = _relative_product_box(selection, crop_box)
         cropped = self.image.crop(crop_box)
         try:
@@ -281,26 +321,30 @@ class WebSelectionState:
         with self.lock:
             self.initial_selection = selection
             self.threshold = threshold
+            self.target_width = target_width
             self.preview = preview
             self.preview_version += 1
             version = self.preview_version
         return {"threshold": threshold, "crop_box": list(crop_box), "version": version}
 
-    def accept_source_selection(self, selection: CropBox) -> None:
+    def accept_source_selection(self, selection: CropBox, target_width: int) -> None:
         crop_box = crop_box_for_selection(selection, self.image.size, self.square_crop)
+        self._validate_target_width(crop_box, target_width)
         with self.lock:
-            self.result = selection, crop_box, None
+            self.result = selection, crop_box, None, target_width
 
     def accept_preview(self) -> None:
         with self.lock:
             selection = self.initial_selection
             threshold = self.threshold
+            target_width = self.target_width
             has_preview = self.preview is not None
-        if selection is None or not has_preview:
+        if selection is None or target_width is None or not has_preview:
             raise ValueError("generate a segmentation preview before accepting")
         crop_box = crop_box_for_selection(selection, self.image.size, self.square_crop)
+        self._validate_target_width(crop_box, target_width)
         with self.lock:
-            self.result = selection, crop_box, threshold
+            self.result = selection, crop_box, threshold, target_width
 
 
 class WebSelectionServer(ThreadingHTTPServer):
@@ -345,6 +389,7 @@ def _handler_for(
                     "display_height": display_size[1],
                     "overwrite_alpha_mask": self.state.overwrite_alpha_mask,
                     "threshold": self.state.threshold,
+                    "target_width": self.state.target_width,
                     "comparisons": [
                         {
                             "index": index,
@@ -381,17 +426,32 @@ def _handler_for(
             request_path = urlsplit(self.path).path
             try:
                 payload = self._read_json()
-                if request_path == "/api/preview":
+                if request_path == "/api/selection-info":
+                    selection = _selection_from_payload(payload.get("selection"))
+                    self._send_json(self.state.selection_info(selection))
+                elif request_path == "/api/preview":
                     selection = _selection_from_payload(payload.get("selection"))
                     threshold = payload.get("threshold")
                     if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
                         raise ValueError("threshold must be numeric")
-                    self._send_json(self.state.preview_selection(selection, float(threshold)))
+                    target_width = _target_width_from_payload(
+                        payload.get("target_width")
+                    )
+                    self._send_json(
+                        self.state.preview_selection(
+                            selection,
+                            float(threshold),
+                            target_width,
+                        )
+                    )
                 elif request_path == "/api/accept":
                     if self.state.overwrite_alpha_mask:
                         self.state.accept_preview()
                     else:
-                        self.state.accept_source_selection(_selection_from_payload(payload.get("selection")))
+                        self.state.accept_source_selection(
+                            _selection_from_payload(payload.get("selection")),
+                            _target_width_from_payload(payload.get("target_width")),
+                        )
                     self._send_json({"accepted": True})
                     self._shutdown_server()
                 elif request_path == "/api/cancel":
@@ -456,13 +516,16 @@ def choose_processing_settings_web(
     *,
     port: int = DEFAULT_WEB_PORT,
     initial_selection: CropBox | None = None,
+    target_width: int | None = None,
     comparison_images: list[tuple[int, Path]] | None = None,
-) -> tuple[CropBox, CropBox, float | None]:
+) -> tuple[CropBox, CropBox, float | None, int]:
     """Select and confirm processing settings through a local temporary server."""
     if not 1 <= port <= 65535:
         raise ValueError("web port must be between 1 and 65535")
     if display_max_width <= 0 or display_max_height <= 0:
         raise ValueError("display dimensions must be positive")
+    if target_width is not None:
+        target_width = _target_width_from_payload(target_width)
     if initial_selection is not None:
         crop_box_for_selection(initial_selection, image.size, square_crop)
     print("Preparing browser selection assets...", flush=True)
@@ -485,6 +548,7 @@ def choose_processing_settings_web(
         working_max_width=working_max_width,
         maximum_display_size=(display_max_width, display_max_height),
         initial_selection=initial_selection,
+        target_width=target_width,
     )
     server = WebSelectionServer(
         ("127.0.0.1", port),
