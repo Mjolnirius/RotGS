@@ -12,6 +12,7 @@ from PIL import Image, UnidentifiedImageError
 
 
 PNG_EXTENSION = ".png"
+IMAGES_DIRECTORY_NAME = "images"
 WINDOW_NAME = "Alpha mask inspector"
 PREVIOUS_KEYS = {
     81,  # OpenCV legacy left
@@ -55,21 +56,33 @@ def _natural_sort_key(path: Path) -> tuple[object, ...]:
 
 
 def find_alpha_pngs(folder_name: str | Path) -> tuple[Path, list[Path]]:
-    """Resolve an input folder and return its directly contained PNG files."""
+    """Return direct PNGs, falling back to a standard ``images`` subfolder."""
     folder = Path(folder_name).expanduser().resolve(strict=True)
     if not folder.is_dir():
         raise ValueError(f"input path is not a folder: {folder}")
 
-    image_files = sorted(
-        (
-            path
-            for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() == PNG_EXTENSION
-        ),
-        key=_natural_sort_key,
-    )
+    def png_files_in(candidate: Path) -> list[Path]:
+        return sorted(
+            (
+                path
+                for path in candidate.iterdir()
+                if path.is_file() and path.suffix.lower() == PNG_EXTENSION
+            ),
+            key=_natural_sort_key,
+        )
+
+    image_files = png_files_in(folder)
     if not image_files:
-        raise ValueError(f"no PNG files found directly inside: {folder}")
+        images_folder = folder / IMAGES_DIRECTORY_NAME
+        if images_folder.is_dir():
+            folder = images_folder.resolve(strict=True)
+            image_files = png_files_in(folder)
+
+    if not image_files:
+        raise ValueError(
+            "no PNG files found directly inside the input folder or its "
+            f"'{IMAGES_DIRECTORY_NAME}' subfolder: {folder}"
+        )
     return folder, image_files
 
 

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 if __package__:
     from .prepare_rotgs_sequence import (
@@ -186,7 +187,11 @@ def _display_comparison_sources(
     if comparison_images is None:
         raise ValueError("six comparison images are required for crop review")
     views: list[tuple[int, bytes, tuple[int, int]]] = []
-    for angle, path in comparison_images:
+    for angle, path in tqdm(
+        comparison_images,
+        desc="Preparing browser crop-review previews",
+        unit="view",
+    ):
         try:
             with Image.open(path) as comparison:
                 comparison.load()
@@ -460,6 +465,7 @@ def choose_processing_settings_web(
         raise ValueError("display dimensions must be positive")
     if initial_selection is not None:
         crop_box_for_selection(initial_selection, image.size, square_crop)
+    print("Preparing browser selection assets...", flush=True)
     source_bytes, display_size = _display_source(
         image,
         overwrite_alpha_mask,

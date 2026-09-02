@@ -215,14 +215,14 @@ def prepare_rotgs_sequence_png(
         raise ValueError("target_width must be positive")
 
     if square_crop:
-        square_output_suffix = (
+        output_suffix = (
             REGENERATED_ALPHA_SQUARE_OUTPUT_SUFFIX
             if overwrite_alpha_mask
             else SOURCE_ALPHA_SQUARE_OUTPUT_SUFFIX
         )
-        output_name = f"{input_folder.name}{square_output_suffix}"
     else:
-        output_name = f"{input_folder.name}{SOURCE_ASPECT_OUTPUT_SUFFIX}"
+        output_suffix = SOURCE_ASPECT_OUTPUT_SUFFIX
+    output_name = f"{input_folder.name}{output_suffix}_{target_width}"
     output_folder = input_folder.with_name(output_name)
     if output_folder.exists():
         raise FileExistsError(
@@ -254,7 +254,11 @@ def prepare_rotgs_sequence_png(
     source_sizes: Counter[tuple[int, int]] = Counter()
     source_alpha_files = 0
     unreliable_rgb_files: list[tuple[str, str]] = []
-    for ordered_image in ordered_images:
+    for ordered_image in tqdm(
+        ordered_images,
+        desc="Validating full-resolution source PNGs",
+        unit="image",
+    ):
         try:
             with Image.open(ordered_image.path) as image:
                 image.load()
