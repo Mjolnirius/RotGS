@@ -262,6 +262,7 @@ class WebSelectionState:
     threshold: float
     working_max_width: int
     maximum_display_size: tuple[int, int]
+    context_label: str | None = None
     initial_selection: CropBox | None = None
     target_width: int | None = None
     result: tuple[CropBox, CropBox, float | None, int] | None = None
@@ -390,6 +391,7 @@ def _handler_for(
                     "overwrite_alpha_mask": self.state.overwrite_alpha_mask,
                     "threshold": self.state.threshold,
                     "target_width": self.state.target_width,
+                    "context_label": self.state.context_label,
                     "comparisons": [
                         {
                             "index": index,
@@ -518,6 +520,7 @@ def choose_processing_settings_web(
     initial_selection: CropBox | None = None,
     target_width: int | None = None,
     comparison_images: list[tuple[int, Path]] | None = None,
+    context_label: str | None = None,
 ) -> tuple[CropBox, CropBox, float | None, int]:
     """Select and confirm processing settings through a local temporary server."""
     if not 1 <= port <= 65535:
@@ -547,6 +550,7 @@ def choose_processing_settings_web(
         threshold=background_threshold,
         working_max_width=working_max_width,
         maximum_display_size=(display_max_width, display_max_height),
+        context_label=context_label,
         initial_selection=initial_selection,
         target_width=target_width,
     )

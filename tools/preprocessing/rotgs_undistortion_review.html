@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RotGS undistortion review</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #101218; color: #edf0f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 360px; }
+    .app { min-height: 100vh; display: flex; flex-direction: column; }
+    header { padding: 11px 16px; border-bottom: 1px solid #30343e; background: #191c23; }
+    h1 { margin: 0 0 5px; font-size: 19px; }
+    .warning { color: #ffd27a; font-size: 14px; }
+    #status { min-height: 20px; color: #b9c1d0; font-size: 14px; }
+    main { flex: 1; min-height: 0; padding: 12px; }
+    .grid { height: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: center; }
+    figure { margin: 0; min-width: 0; overflow: hidden; border: 1px solid #3b414f; border-radius: 7px; background-color: #d1d1d1; background-image: linear-gradient(45deg, #999 25%, transparent 25%), linear-gradient(-45deg, #999 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #999 75%), linear-gradient(-45deg, transparent 75%, #999 75%); background-position: 0 0, 0 12px, 12px -12px, -12px 0; background-size: 24px 24px; }
+    figcaption { padding: 7px 10px; background: #20242d; color: white; font-weight: 650; }
+    .image-viewport { overflow: hidden; cursor: grab; touch-action: none; }
+    .image-viewport.dragging { cursor: grabbing; }
+    img { display: block; width: 100%; max-height: calc(100vh - 270px); object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; }
+    footer { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 110px; padding: 9px 16px; border-top: 1px solid #30343e; background: #191c23; flex-wrap: wrap; }
+    button { border: 1px solid #465064; border-radius: 7px; padding: 8px 13px; background: #282e3a; color: inherit; font: inherit; cursor: pointer; }
+    button:hover { background: #343d4c; }
+    button.primary { background: #245ca8; border-color: #4386dd; }
+    button.danger { background: #59252b; border-color: #a54c57; }
+    button:disabled { opacity: .45; cursor: default; }
+    #position { min-width: 280px; text-align: center; font-size: 13px; color: #b9c1d0; font-variant-numeric: tabular-nums; }
+    #frame-slider { width: min(340px, 65vw); }
+    .controls { display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid #3b414f; border-radius: 7px; background: #20242d; }
+    #zoom-slider { width: 150px; }
+    #zoom-value { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; }
+    .helper-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .decision-label { margin-left: 13px; color: #ffd27a; font-weight: 650; }
+    @media (max-width: 850px) { .grid { grid-template-columns: 1fr; } img { max-height: calc((100vh - 330px) / 2); } .decision-label { width: 100%; margin: 4px 0 0; text-align: center; } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Undistortion review</h1>
+    <div id="context"></div>
+    <div class="warning">Warning: correction changes image geometry and camera intrinsics. The red grid is straight in corrected space and mapped into the original image using the calibration.</div>
+    <div id="status">Loading first comparison…</div>
+  </header>
+  <main>
+    <div class="grid">
+      <figure><figcaption>Original — mapped curved grid</figcaption><div class="image-viewport" id="original-viewport"><img id="original" alt="Original source frame"></div></figure>
+      <figure><figcaption>Undistorted — straight grid</figcaption><div class="image-viewport" id="undistorted-viewport"><img id="undistorted" alt="Undistorted frame"></div></figure>
+    </div>
+  </main>
+  <footer>
+    <button id="previous">← Previous</button>
+    <div><input id="frame-slider" type="range" min="0" value="0" step="1"><div id="position"></div></div>
+    <button id="next">Next →</button>
+    <span class="controls">
+      <button id="zoom-out" title="Zoom out">−</button>
+      <input id="zoom-slider" type="range" min="1" max="8" value="1" step="0.1" aria-label="Zoom">
+      <button id="zoom-in" title="Zoom in">+</button>
+      <span id="zoom-value">100%</span>
+      <button id="reset-view">Reset view</button>
+    </span>
+    <span class="controls"><label class="helper-toggle"><input id="helper-lines" type="checkbox" checked> Red helper grid</label></span>
+    <span class="decision-label">Continue with undistorted pictures?</span>
+    <button class="primary" id="yes">Yes</button>
+    <button class="danger" id="no">No</button>
+  </footer>
+</div>
+<script>
+"use strict";
+const original = document.getElementById("original"), undistorted = document.getElementById("undistorted");
+const originalViewport = document.getElementById("original-viewport"), undistortedViewport = document.getElementById("undistorted-viewport");
+const previous = document.getElementById("previous"), next = document.getElementById("next"), frameSlider = document.getElementById("frame-slider");
+const position = document.getElementById("position"), status = document.getElementById("status");
+const contextLabel = document.getElementById("context");
+const yes = document.getElementById("yes"), no = document.getElementById("no"), helperLines = document.getElementById("helper-lines");
+const zoomSlider = document.getElementById("zoom-slider"), zoomValue = document.getElementById("zoom-value");
+let config = null, index = 0, requestVersion = 0, decided = false;
+let zoom = 1, panX = 0, panY = 0, drag = null;
+
+function setDisabled(value) {
+  previous.disabled = value || index === 0;
+  next.disabled = value || !config || index === config.frames.length - 1;
+  frameSlider.disabled = value; yes.disabled = value; no.disabled = value;
+}
+function applyViewTransform() {
+  const transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  original.style.transform = transform; undistorted.style.transform = transform;
+  zoomSlider.value = zoom; zoomValue.textContent = `${Math.round(zoom * 100)}%`;
+}
+function setZoom(value) {
+  zoom = Math.max(1, Math.min(8, value));
+  if (zoom === 1) { panX = 0; panY = 0; }
+  applyViewTransform();
+}
+function resetView() { zoom = 1; panX = 0; panY = 0; applyViewTransform(); }
+function installPan(viewport) {
+  viewport.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || zoom === 1) return;
+    viewport.setPointerCapture(event.pointerId);
+    viewport.classList.add("dragging");
+    drag = { viewport, x: event.clientX, y: event.clientY };
+  });
+  viewport.addEventListener("pointermove", event => {
+    if (!drag || drag.viewport !== viewport) return;
+    panX += event.clientX - drag.x; panY += event.clientY - drag.y;
+    drag.x = event.clientX; drag.y = event.clientY; applyViewTransform();
+  });
+  const stop = () => { if (!drag || drag.viewport !== viewport) return; drag = null; viewport.classList.remove("dragging"); };
+  viewport.addEventListener("pointerup", stop); viewport.addEventListener("pointercancel", stop);
+  viewport.addEventListener("wheel", event => { event.preventDefault(); setZoom(zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15)); }, { passive: false });
+  viewport.addEventListener("dblclick", resetView);
+}
+async function loadFrame(nextIndex) {
+  if (!config || decided) return;
+  index = Math.max(0, Math.min(config.frames.length - 1, nextIndex)); frameSlider.value = index;
+  const frame = config.frames[index], version = ++requestVersion, helpers = helperLines.checked ? 1 : 0;
+  setDisabled(true); status.textContent = "Generating comparison preview…";
+  const originalImage = new Image(), correctedImage = new Image();
+  originalImage.src = `/api/frame?index=${index}&kind=original&helpers=${helpers}&v=${version}`;
+  correctedImage.src = `/api/frame?index=${index}&kind=undistorted&helpers=${helpers}&v=${version}`;
+  try {
+    await Promise.all([originalImage.decode(), correctedImage.decode()]);
+    if (version !== requestVersion) return;
+    original.src = originalImage.src; undistorted.src = correctedImage.src; applyViewTransform();
+    position.textContent = `Frame ${index + 1} / ${config.frames.length} · ${frame.angle}° · ${frame.name}`;
+    status.textContent = "Zoom or drag either image; the synchronized view is retained between frames.";
+  } catch (_error) { status.textContent = "Failed to generate this comparison. Check the terminal."; }
+  finally { if (version === requestVersion) setDisabled(false); }
+}
+async function postDecision(value) {
+  if (decided) return; decided = true; setDisabled(true);
+  status.textContent = value ? "Accepted. Preparing ROI selection…" : "Rejected. Processing will stop without writing output.";
+  try {
+    const response = await fetch("/api/decision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ continue: value }) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (value) waitForRoiPage();
+  } catch (error) { decided = false; setDisabled(false); status.textContent = error.message; }
+}
+async function waitForRoiPage() {
+  await new Promise(resolve => setTimeout(resolve, 500));
+  while (decided) {
+    try {
+      const response = await fetch(`/api/config?v=${Date.now()}`, { cache: "no-store" });
+      const data = await response.json();
+      if (response.ok && data.kind !== "undistortion-review") { window.location.reload(); return; }
+    } catch (_error) { /* The port is briefly closed while the next stage starts. */ }
+    await new Promise(resolve => setTimeout(resolve, 700));
+  }
+}
+previous.addEventListener("click", () => void loadFrame(index - 1)); next.addEventListener("click", () => void loadFrame(index + 1));
+frameSlider.addEventListener("change", () => void loadFrame(Number(frameSlider.value)));
+helperLines.addEventListener("change", () => void loadFrame(index));
+zoomSlider.addEventListener("input", () => setZoom(Number(zoomSlider.value)));
+document.getElementById("zoom-out").addEventListener("click", () => setZoom(zoom / 1.25));
+document.getElementById("zoom-in").addEventListener("click", () => setZoom(zoom * 1.25));
+document.getElementById("reset-view").addEventListener("click", resetView);
+yes.addEventListener("click", () => void postDecision(true)); no.addEventListener("click", () => void postDecision(false));
+installPan(originalViewport); installPan(undistortedViewport);
+window.addEventListener("keydown", event => {
+  if (event.key === "ArrowLeft") { event.preventDefault(); void loadFrame(index - 1); }
+  else if (event.key === "ArrowRight") { event.preventDefault(); void loadFrame(index + 1); }
+  else if (event.key === "Home") { event.preventDefault(); void loadFrame(0); }
+  else if (event.key === "End") { event.preventDefault(); void loadFrame(config.frames.length - 1); }
+  else if (event.key === "+" || event.key === "=") { event.preventDefault(); setZoom(zoom * 1.25); }
+  else if (event.key === "-") { event.preventDefault(); setZoom(zoom / 1.25); }
+  else if (event.key === "0") { event.preventDefault(); resetView(); }
+  else if (event.key === "Escape") { event.preventDefault(); void postDecision(false); }
+});
+fetch("/api/config").then(response => response.json().then(data => ({ response, data }))).then(({ response, data }) => {
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  config = data; contextLabel.textContent = data.context_label || ""; frameSlider.max = data.frames.length - 1; applyViewTransform(); void loadFrame(0);
+}).catch(error => { status.textContent = error.message; setDisabled(true); });
+</script>
+</body>
+</html>

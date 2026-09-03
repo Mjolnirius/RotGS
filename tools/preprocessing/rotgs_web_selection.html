@@ -42,7 +42,7 @@
 </head>
 <body>
 <div class="app">
-  <header><h1>RotGS crop review</h1><div id="instruction">Loading first image…</div><div id="status"></div></header>
+  <header><h1>RotGS crop review</h1><div id="context"></div><div id="instruction">Loading first image…</div><div id="status"></div></header>
   <main>
     <div class="checker" id="single-viewer"><canvas id="selection-canvas" hidden></canvas></div>
     <div id="review-grid" hidden></div>
@@ -61,6 +61,7 @@
 const canvas = document.getElementById("selection-canvas"), ctx = canvas.getContext("2d");
 const singleViewer = document.getElementById("single-viewer"), reviewGrid = document.getElementById("review-grid");
 const preview = document.getElementById("preview"), instruction = document.getElementById("instruction"), status = document.getElementById("status");
+const contextLabel = document.getElementById("context");
 const continueButton = document.getElementById("continue"), reselectButton = document.getElementById("reselect"), thresholdWrap = document.getElementById("threshold-wrap"), thresholdText = document.getElementById("threshold");
 const resolutionWrap = document.getElementById("resolution-wrap"), finalWidthInput = document.getElementById("final-width"), resolutionInfo = document.getElementById("resolution-info"), useMaxButton = document.getElementById("use-max");
 const source = new Image();
@@ -214,7 +215,7 @@ window.addEventListener("keydown", event => {
   else if (event.key === "]" && stage === "preview") { event.preventDefault(); document.getElementById("exclude").click(); }
 });
 fetch("/api/config").then(response => response.json().then(data => ({ response, data }))).then(({ response, data }) => {
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); config = data; threshold = data.threshold; selection = data.initial_selection; widthTracksNative = data.target_width === null; if (data.target_width !== null) finalWidthInput.value = data.target_width;
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`); config = data; threshold = data.threshold; selection = data.initial_selection; widthTracksNative = data.target_width === null; if (data.target_width !== null) finalWidthInput.value = data.target_width; contextLabel.textContent = data.context_label || "";
   canvas.width = data.display_width; canvas.height = data.display_height; source.src = "/source.png"; source.onload = showSelection; source.onerror = () => { status.textContent = "Could not load source image."; };
 }).catch(error => { status.textContent = error.message; });
 </script>

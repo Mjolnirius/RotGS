@@ -52,7 +52,7 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self._images = "images"
         self._depths = ""
-        self._resolution = -1
+        self._resolution = 1
         self._white_background = True
         self.train_test_exp = False
         self.data_device = "cuda"

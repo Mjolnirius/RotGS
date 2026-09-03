@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +49,10 @@ else:
     )
 
 if __package__:
+    from .rotgs_undistortion_review import review_undistortion_web
     from .rotgs_web_selection import DEFAULT_WEB_PORT, choose_processing_settings_web
 else:
+    from rotgs_undistortion_review import review_undistortion_web
     from rotgs_web_selection import DEFAULT_WEB_PORT, choose_processing_settings_web
 
 
@@ -57,6 +60,342 @@ PNG_EXTENSIONS = {".png"}
 SOURCE_ALPHA_SQUARE_OUTPUT_SUFFIX = "_rn_roi_sqr_PNGaS"
 REGENERATED_ALPHA_SQUARE_OUTPUT_SUFFIX = "_rn_roi_sqr_PNGaR"
 CROP_REVIEW_ANGLES = (0, 60, 120, 180, 240, 300)
+UNDISTORTED_OUTPUT_MARKER = "_und"
+
+
+@dataclass(frozen=True)
+class Undistortion:
+    """Validated full-resolution pinhole undistortion state."""
+
+    calibration_file: Path
+    calibration_sha256: str
+    source_camera_matrix: np.ndarray
+    distortion_coefficients: np.ndarray
+    output_camera_matrix: np.ndarray
+    map_x: np.ndarray
+    map_y: np.ndarray
+    valid_pixels: np.ndarray
+
+
+def _pinhole_camera_entries(cameras_text: str) -> list[tuple[int, int, np.ndarray]]:
+    """Read image dimensions and K from every COLMAP PINHOLE entry."""
+    entries: list[tuple[int, int, np.ndarray]] = []
+    for line_number, line in enumerate(cameras_text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) != 8 or fields[1] != "PINHOLE":
+            raise ValueError(
+                "undistortion requires PINHOLE cameras.txt entries with exactly "
+                f"fx fy cx cy; invalid line {line_number}: {line!r}"
+            )
+        try:
+            width, height = int(fields[2]), int(fields[3])
+            fx, fy, cx, cy = (float(value) for value in fields[4:])
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid numeric camera value on line {line_number}: {line!r}"
+            ) from exc
+        entries.append(
+            (
+                width,
+                height,
+                np.array(
+                    [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                    dtype=np.float64,
+                ),
+            )
+        )
+    if not entries:
+        raise ValueError("cameras.txt contains no PINHOLE camera entries")
+    return entries
+
+
+def _cameras_text_with_matrix(
+    cameras_text: str,
+    image_size: tuple[int, int],
+    camera_matrix: np.ndarray,
+) -> str:
+    """Replace PINHOLE dimensions and intrinsics while retaining comments/IDs."""
+    width, height = image_size
+    values = (
+        float(camera_matrix[0, 0]),
+        float(camera_matrix[1, 1]),
+        float(camera_matrix[0, 2]),
+        float(camera_matrix[1, 2]),
+    )
+    parameters = " ".join(format(value, ".17g") for value in values)
+    updated: list[str] = []
+    for line in cameras_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            updated.append(line)
+            continue
+        fields = stripped.split()
+        updated.append(f"{fields[0]} PINHOLE {width} {height} {parameters}")
+    result = "\n".join(updated)
+    if cameras_text.endswith(("\n", "\r")):
+        result += "\n"
+    return result
+
+
+def _load_undistortion(
+    calibration_file: str | Path,
+    source_size: tuple[int, int],
+    cameras_text: str,
+) -> Undistortion:
+    """Validate an OpenCV calibration and build reusable full-size remap maps."""
+    calibration_path = Path(calibration_file).expanduser().resolve(strict=True)
+    if not calibration_path.is_file():
+        raise ValueError(f"calibration path is not a file: {calibration_path}")
+    try:
+        with np.load(calibration_path, allow_pickle=False) as calibration:
+            required = {"camera_matrix", "dist_coeffs", "image_size"}
+            missing = required.difference(calibration.files)
+            if missing:
+                raise ValueError(
+                    "calibration file is missing: " + ", ".join(sorted(missing))
+                )
+            camera_matrix = np.asarray(
+                calibration["camera_matrix"], dtype=np.float64
+            )
+            distortion = np.asarray(
+                calibration["dist_coeffs"], dtype=np.float64
+            ).reshape(-1)
+            calibration_size_array = np.asarray(
+                calibration["image_size"]
+            ).reshape(-1)
+    except OSError as exc:
+        raise ValueError(f"could not read calibration file: {calibration_path}") from exc
+
+    if camera_matrix.shape != (3, 3) or not np.all(np.isfinite(camera_matrix)):
+        raise ValueError("calibration camera_matrix must be a finite 3x3 matrix")
+    if camera_matrix[0, 0] <= 0 or camera_matrix[1, 1] <= 0:
+        raise ValueError("calibration focal lengths must be positive")
+    if not np.allclose(camera_matrix[2], (0.0, 0.0, 1.0), atol=1e-12):
+        raise ValueError("calibration camera_matrix must have final row [0, 0, 1]")
+    if distortion.size not in {4, 5, 8, 12, 14} or not np.all(
+        np.isfinite(distortion)
+    ):
+        raise ValueError(
+            "calibration dist_coeffs must contain 4, 5, 8, 12, or 14 finite values"
+        )
+    if calibration_size_array.size != 2:
+        raise ValueError("calibration image_size must contain width and height")
+    calibration_size = tuple(int(value) for value in calibration_size_array)
+    if calibration_size != source_size:
+        raise ValueError(
+            "calibration and source image dimensions differ: "
+            f"calibration={calibration_size[0]}x{calibration_size[1]}, "
+            f"source={source_size[0]}x{source_size[1]}"
+        )
+
+    for camera_width, camera_height, cameras_matrix in _pinhole_camera_entries(
+        cameras_text
+    ):
+        if (camera_width, camera_height) != source_size:
+            raise ValueError(
+                "cameras.txt and source image dimensions differ: "
+                f"camera={camera_width}x{camera_height}, "
+                f"source={source_size[0]}x{source_size[1]}"
+            )
+        if not np.allclose(cameras_matrix, camera_matrix, rtol=1e-7, atol=1e-4):
+            raise ValueError(
+                "cameras.txt intrinsics do not match calibration camera_matrix"
+            )
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "OpenCV is required for undistortion; run through 'uv run python'"
+        ) from exc
+    # Reusing K preserves central pixel density. Invalid outer pixels are tracked
+    # and forbidden inside the accepted crop.
+    output_camera_matrix = camera_matrix.copy()
+    map_x, map_y = cv2.initUndistortRectifyMap(
+        camera_matrix,
+        distortion,
+        None,
+        output_camera_matrix,
+        source_size,
+        cv2.CV_32FC1,
+    )
+    source_width, source_height = source_size
+    valid_pixels = (
+        (map_x >= 0.0)
+        & (map_x <= source_width - 1)
+        & (map_y >= 0.0)
+        & (map_y <= source_height - 1)
+    )
+    return Undistortion(
+        calibration_file=calibration_path,
+        calibration_sha256=hashlib.sha256(calibration_path.read_bytes()).hexdigest(),
+        source_camera_matrix=camera_matrix,
+        distortion_coefficients=distortion,
+        output_camera_matrix=output_camera_matrix,
+        map_x=map_x,
+        map_y=map_y,
+        valid_pixels=valid_pixels,
+    )
+
+
+def _resolve_undistortion(
+    calibration_file: str | Path | None,
+    cameras_file: Path,
+    source_size: tuple[int, int],
+    cameras_text: str,
+) -> Undistortion:
+    """Load an override or auto-discover the compatible session calibration."""
+    if calibration_file is not None:
+        print(
+            f"Using explicit camera calibration: {calibration_file}",
+            flush=True,
+        )
+        return _load_undistortion(calibration_file, source_size, cameras_text)
+
+    session_root = next(
+        (
+            parent
+            for parent in cameras_file.parents
+            if parent.name.casefold().startswith("session_")
+        ),
+        cameras_file.parent,
+    )
+    candidates = sorted(
+        path.resolve()
+        for path in session_root.rglob("camera_calibration.npz")
+        if path.is_file()
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            "undistortion is enabled by default, but no camera_calibration.npz "
+            f"was found below {session_root}; pass --calibration only when the "
+            "calibration is stored elsewhere"
+        )
+
+    compatible: list[Undistortion] = []
+    rejected: list[tuple[Path, str]] = []
+    for candidate in candidates:
+        try:
+            compatible.append(
+                _load_undistortion(candidate, source_size, cameras_text)
+            )
+        except (OSError, ValueError) as exc:
+            rejected.append((candidate, str(exc)))
+
+    if len(compatible) == 1:
+        selected = compatible[0]
+        print(
+            f"Automatically selected camera calibration: "
+            f"{selected.calibration_file}",
+            flush=True,
+        )
+        return selected
+    if len(compatible) > 1:
+        choices = "\n  ".join(
+            str(item.calibration_file) for item in compatible
+        )
+        raise ValueError(
+            "multiple camera calibrations match the source images and "
+            f"cameras.txt; select one with --calibration:\n  {choices}"
+        )
+
+    reasons = "\n  ".join(
+        f"{candidate}: {reason}" for candidate, reason in rejected
+    )
+    raise ValueError(
+        "undistortion is enabled by default, but no discovered calibration "
+        f"matches the source images and cameras.txt:\n  {reasons}"
+    )
+
+
+def _remap_rgb(image: Image.Image, undistortion: Undistortion) -> Image.Image:
+    """Undistort RGB, filling outside-calibration pixels with white."""
+    import cv2
+
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    corrected = cv2.remap(
+        rgb,
+        undistortion.map_x,
+        undistortion.map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return Image.fromarray(corrected)
+
+
+def _remap_rgba(image: Image.Image, undistortion: Undistortion) -> Image.Image:
+    """Undistort RGBA in premultiplied form to prevent transparent-edge halos."""
+    import cv2
+
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8)
+    rgb = rgba[..., :3]
+    alpha = rgba[..., 3]
+    alpha_u16 = alpha.astype(np.uint16)
+    premultiplied = np.empty_like(rgb)
+    for channel in range(3):
+        product = rgb[..., channel].astype(np.uint16) * alpha_u16
+        premultiplied[..., channel] = ((product + 127) // 255).astype(np.uint8)
+    corrected_premultiplied = cv2.remap(
+        premultiplied,
+        undistortion.map_x,
+        undistortion.map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    corrected_alpha = cv2.remap(
+        alpha,
+        undistortion.map_x,
+        undistortion.map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    corrected_rgb = np.zeros_like(corrected_premultiplied)
+    nonzero = corrected_alpha > 0
+    denominator = corrected_alpha[nonzero].astype(np.float32)
+    for channel in range(3):
+        values = corrected_premultiplied[..., channel][nonzero].astype(np.float32)
+        corrected_rgb[..., channel][nonzero] = np.clip(
+            np.rint(values * 255.0 / denominator), 0, 255
+        ).astype(np.uint8)
+    corrected = np.dstack((corrected_rgb, corrected_alpha))
+    return Image.fromarray(corrected)
+
+
+def _undistort_image(
+    image: Image.Image,
+    undistortion: Undistortion | None,
+    overwrite_alpha_mask: bool,
+) -> Image.Image:
+    """Return an independent source image in the mode needed by its alpha branch."""
+    if undistortion is None:
+        return image.convert("RGB" if overwrite_alpha_mask else "RGBA")
+    if overwrite_alpha_mask:
+        return _remap_rgb(image, undistortion)
+    return _remap_rgba(image, undistortion)
+
+
+def _validate_valid_crop(
+    crop_box: CropBox,
+    undistortion: Undistortion | None,
+) -> None:
+    if undistortion is None:
+        return
+    left, top, right, bottom = crop_box
+    valid_crop = undistortion.valid_pixels[top:bottom, left:right]
+    invalid_count = int(valid_crop.size - np.count_nonzero(valid_crop))
+    if invalid_count:
+        invalid_percentage = 100.0 * invalid_count / valid_crop.size
+        raise ValueError(
+            "selected crop contains pixels outside the valid undistorted image "
+            f"({invalid_count} pixels, {invalid_percentage:.4f}%); move or shrink "
+            "the ROI"
+        )
 
 
 def _has_alpha(image: Image.Image) -> bool:
@@ -164,6 +503,12 @@ def _print_summary(summary: dict[str, Any]) -> None:
     print(f"  Successfully processed:   {summary['processed']}")
     print(f"  Alpha mode:               {summary['alpha_mode']}")
     print(
+        "  Undistortion:             "
+        + ("applied" if summary["undistortion_applied"] else "not requested")
+    )
+    if summary["calibration_file"] is not None:
+        print(f"  Calibration:              {summary['calibration_file']}")
+    print(
         "  Source alpha files:       "
         f"{summary['source_alpha_files']}/{summary['found']}"
     )
@@ -192,6 +537,7 @@ def prepare_rotgs_sequence_png(
     cameras_file: str | Path,
     target_width: int | None = None,
     *,
+    calibration_file: str | Path | None = None,
     selection: CropBox | None = None,
     background_threshold: float = 12.0,
     segmentation_max_width: int = 1600,
@@ -202,6 +548,9 @@ def prepare_rotgs_sequence_png(
     confirm_segmentation: bool = True,
     square_crop: bool = True,
     overwrite_alpha_mask: bool = False,
+    destination_folder: str | Path | None = None,
+    review_label: str | None = None,
+    print_summary: bool = True,
 ) -> dict[str, Any]:
     """Prepare PNGs and cameras in a sibling RotGS-ready output folder."""
     started_at = time.perf_counter()
@@ -211,6 +560,20 @@ def prepare_rotgs_sequence_png(
         raise ValueError(f"input path is not a folder: {input_folder}")
     if not input_cameras_file.is_file():
         raise ValueError(f"cameras path is not a file: {input_cameras_file}")
+    requested_output_folder = (
+        Path(destination_folder).expanduser().resolve()
+        if destination_folder is not None
+        else None
+    )
+    if requested_output_folder is not None:
+        if requested_output_folder == input_folder:
+            raise ValueError("output folder must differ from the input folder")
+        if input_folder in requested_output_folder.parents:
+            raise ValueError("output folder must not be inside the input folder")
+        if not requested_output_folder.parent.is_dir():
+            raise ValueError(
+                f"output parent does not exist: {requested_output_folder.parent}"
+            )
     if target_width is not None and target_width <= 0:
         raise ValueError("target_width must be positive")
 
@@ -286,6 +649,33 @@ def prepare_rotgs_sequence_png(
             f"all source images must have one resolution; found {size_text}"
         )
     source_size = next(iter(source_sizes))
+    cameras_text = input_cameras_file.read_text(encoding="utf-8")
+    print("Preparing full-resolution undistortion maps...", flush=True)
+    undistortion = _resolve_undistortion(
+        calibration_file,
+        input_cameras_file,
+        source_size,
+        cameras_text,
+    )
+    review_frames = [(item.angle, item.path) for item in ordered_images]
+    accepted = review_undistortion_web(
+        review_frames,
+        lambda image: _undistort_image(
+            image,
+            undistortion,
+            overwrite_alpha_mask,
+        ),
+        display_max_width,
+        display_max_height,
+        preserve_alpha=not overwrite_alpha_mask,
+        destination_to_source_maps=(undistortion.map_x, undistortion.map_y),
+        port=web_port,
+        context_label=review_label,
+    )
+    if not accepted:
+        raise SelectionCancelled(
+            "undistortion was rejected; no output was written"
+        )
 
     run_warnings: list[str] = []
     if unreliable_rgb_files:
@@ -304,13 +694,44 @@ def prepare_rotgs_sequence_png(
             run_warnings,
         )
 
-    cameras_text = input_cameras_file.read_text(encoding="utf-8")
-    with Image.open(ordered_images[0].path) as first_source:
-        first_source.load()
-        first_image = first_source.convert(
-            "RGB" if overwrite_alpha_mask else "RGBA"
-        )
+    preview_temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+    preview_comparison_images = comparison_images
+    first_image: Image.Image | None = None
     try:
+        if undistortion is not None:
+            preview_temporary_directory = tempfile.TemporaryDirectory(
+                prefix="rotgs-undistorted-previews-"
+            )
+            preview_root = Path(preview_temporary_directory.name)
+            preview_comparison_images = []
+            for index, (angle, source_path) in enumerate(
+                tqdm(
+                    comparison_images,
+                    desc="Undistorting browser crop-review previews",
+                    unit="view",
+                )
+            ):
+                with Image.open(source_path) as comparison_source:
+                    comparison_source.load()
+                    corrected_comparison = _undistort_image(
+                        comparison_source,
+                        undistortion,
+                        overwrite_alpha_mask,
+                    )
+                corrected_path = preview_root / f"{index:02d}.png"
+                try:
+                    corrected_comparison.save(corrected_path, format="PNG")
+                finally:
+                    corrected_comparison.close()
+                preview_comparison_images.append((angle, corrected_path))
+
+        with Image.open(ordered_images[0].path) as first_source:
+            first_source.load()
+            first_image = _undistort_image(
+                first_source,
+                undistortion,
+                overwrite_alpha_mask,
+            )
         needs_web_selection = selection is None or (
             overwrite_alpha_mask and confirm_segmentation
         )
@@ -331,7 +752,8 @@ def prepare_rotgs_sequence_png(
                 port=web_port,
                 initial_selection=selection,
                 target_width=target_width,
-                comparison_images=comparison_images,
+                comparison_images=preview_comparison_images,
+                context_label=review_label,
             )
         else:
             crop_box = crop_box_for_selection(selection, source_size, square_crop)
@@ -341,20 +763,41 @@ def prepare_rotgs_sequence_png(
                 crop_width if target_width is None else target_width
             )
     finally:
-        first_image.close()
+        if first_image is not None:
+            first_image.close()
+        if preview_temporary_directory is not None:
+            preview_temporary_directory.cleanup()
 
+    _validate_valid_crop(crop_box, undistortion)
     crop_size = crop_box[2] - crop_box[0], crop_box[3] - crop_box[1]
     output_size = calculate_output_size(crop_size, resolved_target_width)
-    output_name = f"{input_folder.name}{output_suffix}_{resolved_target_width}"
-    output_folder = input_folder.with_name(output_name)
+    undistortion_marker = UNDISTORTED_OUTPUT_MARKER if undistortion else ""
+    output_name = (
+        f"{input_folder.name}{undistortion_marker}"
+        f"{output_suffix}_{resolved_target_width}"
+    )
+    output_folder = (
+        requested_output_folder
+        if requested_output_folder is not None
+        else input_folder.with_name(output_name)
+    )
     if output_folder.exists():
         raise FileExistsError(
             "output folder already exists; refusing to mix runs: "
             f"{output_folder}"
         )
     product_box = _relative_product_box(selection, crop_box)
+    pinhole_source_text = (
+        _cameras_text_with_matrix(
+            cameras_text,
+            source_size,
+            undistortion.output_camera_matrix,
+        )
+        if undistortion is not None
+        else cameras_text
+    )
     updated_cameras_text = transform_camera_intrinsics(
-        cameras_text,
+        pinhole_source_text,
         source_size,
         crop_box,
         output_size,
@@ -368,7 +811,7 @@ def prepare_rotgs_sequence_png(
     }
     per_image_alpha: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(
-        dir=input_folder.parent,
+        dir=output_folder.parent,
         prefix=f".{output_folder.name}.",
         suffix=".tmp",
     ) as temporary_directory:
@@ -378,9 +821,14 @@ def prepare_rotgs_sequence_png(
         output_images_folder.mkdir(parents=True)
         output_sparse_folder.mkdir(parents=True)
 
+        progress_description = (
+            "Undistorting and preparing RotGS PNG sequence"
+            if undistortion is not None
+            else "Preparing RotGS PNG sequence"
+        )
         for ordered_image in tqdm(
             ordered_images,
-            desc="Preparing RotGS PNG sequence",
+            desc=progress_description,
             unit="image",
         ):
             with Image.open(ordered_image.path) as source_image:
@@ -393,32 +841,36 @@ def prepare_rotgs_sequence_png(
                     raise RuntimeError(
                         f"source dimension changed for {ordered_image.path.name}"
                     )
-                if overwrite_alpha_mask:
-                    rgb_image = source_image.convert("RGB")
-                    cropped = rgb_image.crop(crop_box)
-                    rgb_image.close()
-                    try:
-                        alpha = segment_product_alpha(
-                            cropped,
-                            product_box,
-                            background_threshold=chosen_threshold,
-                            working_max_width=segmentation_max_width,
-                        )
+                if not overwrite_alpha_mask and not _has_alpha(source_image):
+                    raise RuntimeError(
+                        f"source alpha disappeared for {ordered_image.path.name}"
+                    )
+                corrected_source = _undistort_image(
+                    source_image,
+                    undistortion,
+                    overwrite_alpha_mask,
+                )
+                try:
+                    if overwrite_alpha_mask:
+                        cropped = corrected_source.crop(crop_box)
                         try:
-                            rgba = cropped.convert("RGBA")
-                            rgba.putalpha(alpha)
+                            alpha = segment_product_alpha(
+                                cropped,
+                                product_box,
+                                background_threshold=chosen_threshold,
+                                working_max_width=segmentation_max_width,
+                            )
+                            try:
+                                rgba = cropped.convert("RGBA")
+                                rgba.putalpha(alpha)
+                            finally:
+                                alpha.close()
                         finally:
-                            alpha.close()
-                    finally:
-                        cropped.close()
-                else:
-                    if not _has_alpha(source_image):
-                        raise RuntimeError(
-                            f"source alpha disappeared for {ordered_image.path.name}"
-                        )
-                    source_rgba = source_image.convert("RGBA")
-                    rgba = source_rgba.crop(crop_box)
-                    source_rgba.close()
+                            cropped.close()
+                    else:
+                        rgba = corrected_source.crop(crop_box)
+                finally:
+                    corrected_source.close()
 
             try:
                 if rgba.size == output_size:
@@ -477,6 +929,7 @@ def prepare_rotgs_sequence_png(
 
         metadata: dict[str, Any] = {
             "input_folder": str(input_folder),
+            "review_label": review_label,
             "input_cameras_file": str(input_cameras_file),
             "input_cameras_sha256": hashlib.sha256(
                 cameras_text.encode("utf-8")
@@ -489,6 +942,7 @@ def prepare_rotgs_sequence_png(
                 "regenerated" if overwrite_alpha_mask else "preserve_source"
             ),
             "overwrite_alpha_mask": overwrite_alpha_mask,
+            "undistortion": None,
             "image_count": len(ordered_images),
             "angles_degrees": [item.angle for item in ordered_images],
             "crop_review_images": [
@@ -517,6 +971,32 @@ def prepare_rotgs_sequence_png(
             "per_image_alpha_statistics": per_image_alpha,
             "warnings": run_warnings,
         }
+        if undistortion is not None:
+            metadata["undistortion"] = {
+                "applied": True,
+                "calibration_file": str(undistortion.calibration_file),
+                "calibration_sha256": undistortion.calibration_sha256,
+                "source_camera_matrix": (
+                    undistortion.source_camera_matrix.tolist()
+                ),
+                "distortion_coefficients": (
+                    undistortion.distortion_coefficients.tolist()
+                ),
+                "output_camera_matrix": (
+                    undistortion.output_camera_matrix.tolist()
+                ),
+                "output_policy": "same_intrinsics_preserve_central_density",
+                "interpolation": "opencv_inter_linear",
+                "valid_source_pixel_percentage": (
+                    100.0 * float(np.mean(undistortion.valid_pixels))
+                ),
+                "accepted_crop_contains_only_valid_pixels": True,
+                "alpha_remap": (
+                    "discarded_then_regenerated_after_undistortion"
+                    if overwrite_alpha_mask
+                    else "premultiplied_rgba"
+                ),
+            }
         if overwrite_alpha_mask:
             metadata["segmentation"] = {
                 "background_threshold_lab": chosen_threshold,
@@ -537,6 +1017,7 @@ def prepare_rotgs_sequence_png(
 
     summary: dict[str, Any] = {
         "input_folder": str(input_folder),
+        "review_label": review_label,
         "input_cameras_file": str(input_cameras_file),
         "output_folder": str(output_folder),
         "output_cameras_file": str(output_folder / "sparse" / "0" / "cameras.txt"),
@@ -544,6 +1025,10 @@ def prepare_rotgs_sequence_png(
         "found": len(ordered_images),
         "processed": len(ordered_images),
         "alpha_mode": "regenerated" if overwrite_alpha_mask else "preserve_source",
+        "undistortion_applied": undistortion is not None,
+        "calibration_file": (
+            str(undistortion.calibration_file) if undistortion is not None else None
+        ),
         "source_alpha_files": source_alpha_files,
         "angle_range": f"{ordered_images[0].angle}..{ordered_images[-1].angle}",
         "angle_token_from_right": detected_angle_index,
@@ -557,7 +1042,8 @@ def prepare_rotgs_sequence_png(
         "warnings": run_warnings,
         "elapsed_seconds": time.perf_counter() - started_at,
     }
-    _print_summary(summary)
+    if print_summary:
+        _print_summary(summary)
     return summary
 
 
@@ -565,8 +1051,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Rename a 5-degree PNG sequence, crop it for RotGS, preserve its "
-            "source alpha by default or regenerate alpha, optionally downscale, "
-            "and update cameras.txt."
+            "source alpha by default or regenerate alpha, undistort by default "
+            "and downscale, and update cameras.txt."
         )
     )
     parser.add_argument("folder_name", help="folder containing source PNG files")
@@ -574,6 +1060,15 @@ def _parse_args() -> argparse.Namespace:
         "--cameras",
         required=True,
         help="session COLMAP cameras.txt file",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help=(
+            "override the automatically discovered camera_calibration.npz; "
+            "normally no argument is needed"
+        ),
     )
     parser.add_argument(
         "--width",
@@ -647,6 +1142,7 @@ def main() -> int:
             args.folder_name,
             args.cameras,
             target_width=args.width,
+            calibration_file=args.calibration,
             background_threshold=args.background_threshold,
             segmentation_max_width=args.segmentation_max_width,
             display_max_width=args.display_max_width,
