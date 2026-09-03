@@ -17,3 +17,6 @@ output
 # Keep milestone report media portable.
 !milestones/assets/
 !milestones/assets/**/*.png
+
+#Ignore following folder
+Session Saves
