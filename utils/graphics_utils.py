@@ -13,6 +13,8 @@ import torch
 import math
 import numpy as np
 from typing import NamedTuple
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import open3d as o3d

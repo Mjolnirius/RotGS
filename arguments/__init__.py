@@ -86,6 +86,9 @@ class OptimizationParams(ParamGroup):
         self.axis_lr_final = 1e-8
         self.center_lr_init = 1e-4
         self.center_lr_final = 1e-8
+        self.depth_lr_init = 5e-4
+        self.depth_lr_final = 1e-7
+        self.depth_lr_max_steps = 15_000
         self.position_lr_init = 0.00016 
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -107,6 +110,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_foreground_rgb = 1.0
         self.lambda_full_rgb = 0.1
         self.lambda_alpha = 0.1
+        self.lambda_silhouette = 0.0
         self.lambda_center_reg = 0.01
         self.ssim_crop_padding = 8
         self.lambda_flow = 0.5

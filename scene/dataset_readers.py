@@ -21,6 +21,7 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from utils.general_utils import add_noise
+from utils.multi_camera_dataset import load_multi_camera_bundle
 from scene.gaussian_model import BasicPointCloud
 import torch
 import re
@@ -318,14 +319,17 @@ def readMultiSceneInfo(
     angle_noise_std=0.0,
     rotation_direction=-1,
 ):
-    camera_dir = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
-    camera_dir.sort()
+    bundle = load_multi_camera_bundle(path)
+    camera_passes = bundle.passes
     train_cam_infos = []
     test_cam_infos = []
-    print("total Camera number: {}".format(len(camera_dir)))
-    for idx, cam in enumerate(camera_dir):
-        cam_idx = idx
-        camera_path = os.path.join(path, cam)
+    print("total Camera number: {}".format(len(camera_passes)))
+    if bundle.metadata_path is not None:
+        print(f"Using multi-camera metadata: {bundle.metadata_path}")
+    for camera_pass in camera_passes:
+        cam = camera_pass.directory_name
+        cam_idx = camera_pass.camera_index
+        camera_path = str(camera_pass.path)
         # get intrinstic parameter
         try:
             cameras_intrinsic_file = os.path.join(camera_path, "sparse/0", "cameras.bin")
@@ -361,16 +365,27 @@ def readMultiSceneInfo(
         train_cam_infos_curr = []
         test_cam_infos_curr = []
 
-        for i in cam_infos:
-            if i.image_name in test_cam_names_list:
-                test_cam_infos_curr.append(i)
+        for camera_info in cam_infos:
+            camera_info.image_name = f"{cam}/{camera_info.image_name}"
+            if camera_info.is_test:
+                test_cam_infos_curr.append(camera_info)
             else:
-                train_cam_infos_curr.append(i)
+                train_cam_infos_curr.append(camera_info)
         
         train_cam_infos.extend(train_cam_infos_curr)
         test_cam_infos.extend(test_cam_infos_curr)
 
-        nerf_normalization = getNerfppNorm(train_cam_infos)
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    if (
+        not np.isfinite(nerf_normalization["radius"])
+        or nerf_normalization["radius"] <= 1e-8
+    ):
+        nerf_normalization = dict(nerf_normalization)
+        nerf_normalization["radius"] = float(distance)
+        print(
+            "Fixed multi-camera normalization radius was zero; "
+            f"using camera distance {distance:.6g} for spatial learning"
+        )
 
     if random_init:
         # init from random points

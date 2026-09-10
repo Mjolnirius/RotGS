@@ -59,6 +59,23 @@ def masked_psnr(network_output, gt, mask, eps=1e-12):
     mse_value = squared_error.sum() / denominator.clamp_min(eps)
     return 20 * torch.log10(1.0 / torch.sqrt(mse_value.clamp_min(eps)))
 
+
+def silhouette_iou_loss(predicted_alpha, target_mask, eps=1e-8):
+    """Soft IoU loss that penalizes both missing and excess silhouette area."""
+    predicted_alpha = predicted_alpha.squeeze()
+    target_mask = target_mask.to(
+        device=predicted_alpha.device, dtype=predicted_alpha.dtype
+    ).squeeze()
+    if predicted_alpha.shape != target_mask.shape:
+        raise ValueError(
+            "predicted alpha and target mask must have the same shape, got "
+            f"{tuple(predicted_alpha.shape)} and {tuple(target_mask.shape)}"
+        )
+
+    intersection = (predicted_alpha * target_mask).sum()
+    union = predicted_alpha.sum() + target_mask.sum() - intersection
+    return 1.0 - (intersection + eps) / (union + eps)
+
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 

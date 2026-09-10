@@ -22,6 +22,7 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 from scene.residual_predictor import ResidualPredictor
+from utils.multi_camera_dataset import load_multi_camera_bundle
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
@@ -36,11 +37,11 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
 
-    raster_setting_flag = 0
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        if raster_setting_flag == 0:
-            fixed_rasterizer = set_rasterizer(view, gaussians, pipeline, background, scaling_modifier=1.0)
-            raster_setting_flag = 1
+        # Mixed-resolution camera passes require per-view raster settings.
+        fixed_rasterizer = set_rasterizer(
+            view, gaussians, pipeline, background, scaling_modifier=1.0
+        )
 
         if fixed_camera:
             coarse_angle = view.rotation_angle.clone().detach().unsqueeze(0).to('cuda')
@@ -69,28 +70,47 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
         if args.multi_camera:
-            camera_dir = [d for d in os.listdir(args.source_path) if os.path.isdir(os.path.join(args.source_path, d))]
-            number_of_cameras = len(camera_dir)
+            bundle = load_multi_camera_bundle(dataset.source_path)
+            number_of_cameras = len(bundle.passes)
+            axis_tilt_init_degrees = bundle.rough_elevations_degrees
         else:
             number_of_cameras = 1
+            axis_tilt_init_degrees = None
         gaussians = GaussianModel(
             dataset.sh_degree,
             fixed_camera=args.fixed_camera,
             multi_camera=args.multi_camera,
             number_of_cameras=number_of_cameras,
+            freeze_depth=getattr(args, "freeze_depth", False),
             axis_mode=getattr(args, "axis_mode", "free"),
             axis_tilt_init_deg=getattr(args, "axis_tilt_init_deg", 30.0),
             axis_tilt_min_deg=getattr(args, "axis_tilt_min_deg", 0.0),
             axis_tilt_max_deg=getattr(args, "axis_tilt_max_deg", 90.0),
             axis_side_limit_deg=getattr(args, "axis_side_limit_deg", 5.0),
+            axis_tilt_deviation_limit_deg=getattr(
+                args, "axis_tilt_deviation_limit_deg", None
+            ),
             center_max_offset=getattr(args, "center_max_offset", 0.25),
             center_warmup_iterations=getattr(args, "center_warmup_iterations", 2000),
+            depth_max_offset=getattr(args, "depth_max_offset", 2.0),
+            depth_warmup_iterations=getattr(args, "depth_warmup_iterations", 0),
+            depth_reference_camera_index=getattr(
+                args, "reference_camera_index", 0
+            ),
+            axis_tilt_init_degrees=axis_tilt_init_degrees,
+            multi_camera_transform=getattr(
+                args, "multi_camera_transform", "legacy"
+            ),
         )
         scene = Scene(dataset, gaussians, args.fixed_camera, load_iteration=iteration, shuffle=False, random_init=True, multi_camera=args.multi_camera, eval_mode=True)
         residual_predictor = ResidualPredictor(
             number_of_cameras,
             max_residual_angle_deg=getattr(args, "max_residual_angle_deg", 0.0),
             max_sweep_error_deg=getattr(args, "max_sweep_error_deg", 0.0),
+            max_phase_offset_deg=getattr(args, "max_phase_offset_deg", 0.0),
+            reference_camera_index=getattr(
+                args, "reference_camera_index", 0
+            ),
         )
         residual_predictor.load_weights(dataset.model_path, iteration=scene.loaded_iter)
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
@@ -121,6 +141,13 @@ if __name__ == "__main__":
         help="bound residual angle correction to +/- this many degrees; 0 keeps the original unbounded behavior",
     )
     parser.add_argument("--max_sweep_error_deg", type=float, default=None)
+    parser.add_argument("--max_phase_offset_deg", type=float, default=None)
+    parser.add_argument("--reference_camera_index", type=int, default=None)
+    parser.add_argument(
+        "--multi_camera_transform",
+        choices=("rigid", "legacy"),
+        default=None,
+    )
     parser.add_argument(
         "--axis_mode",
         choices=("free", "bounded_tilt"),
@@ -130,8 +157,12 @@ if __name__ == "__main__":
     parser.add_argument("--axis_tilt_min_deg", type=float, default=None)
     parser.add_argument("--axis_tilt_max_deg", type=float, default=None)
     parser.add_argument("--axis_side_limit_deg", type=float, default=None)
+    parser.add_argument("--axis_tilt_deviation_limit_deg", type=float, default=None)
     parser.add_argument("--center_max_offset", type=float, default=None)
     parser.add_argument("--center_warmup_iterations", type=int, default=None)
+    parser.add_argument("--depth_max_offset", type=float, default=None)
+    parser.add_argument("--depth_warmup_iterations", type=int, default=None)
+    parser.add_argument("--freeze_depth", action="store_true", default=None)
     parser.add_argument("--multi_camera", action="store_true", default=False, help="multi-camera system")
     parser.add_argument('--name', type=str, default='random', help='Output folder name')
 

@@ -15,6 +15,8 @@ from datetime import datetime
 import numpy as np
 import random
 from PIL import Image
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import os
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -474,7 +476,7 @@ def save_comparison_image(iteration, image, gt_image, save_path="comparison.png"
     fig.text(0.5, 0.05, f"Iteration: {iteration}", ha='center', fontsize=12, color='black')
 
     plt.tight_layout()
-    save_path = f"comparison/{iteration}.png"
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     plt.savefig(save_path, dpi=80)
     plt.close()
 
