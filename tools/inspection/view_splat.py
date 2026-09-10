@@ -21,7 +21,9 @@ from typing import Sequence
 from urllib.parse import urlsplit
 
 
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
+# ``view_splat.py`` lives in ``tools/inspection``; training runs live at the
+# repository-level ``output`` directory, not alongside this tool.
+DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parents[2] / "output"
 DEFAULT_EDITOR_URL = "https://superspl.at/editor"
 ITERATION_PATTERN = re.compile(r"^iteration_(\d+)$")
 
