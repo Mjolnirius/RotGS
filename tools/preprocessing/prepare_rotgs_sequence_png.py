@@ -547,7 +547,9 @@ def prepare_rotgs_sequence_png(
     angle_token_from_right: int | None = None,
     confirm_segmentation: bool = True,
     square_crop: bool = True,
-    overwrite_alpha_mask: bool = False,
+    overwrite_alpha_mask: bool = True,
+    review_undistortion: bool = False,
+    skip_source_validation: bool = False,
     destination_folder: str | Path | None = None,
     review_label: str | None = None,
     print_summary: bool = True,
@@ -607,48 +609,63 @@ def prepare_rotgs_sequence_png(
         for target_angle in CROP_REVIEW_ANGLES
     ]
 
-    source_sizes: Counter[tuple[int, int]] = Counter()
     source_alpha_files = 0
     unreliable_rgb_files: list[tuple[str, str]] = []
-    for ordered_image in tqdm(
-        ordered_images,
-        desc="Validating full-resolution source PNGs",
-        unit="image",
-    ):
+    if skip_source_validation:
         try:
-            with Image.open(ordered_image.path) as image:
-                image.load()
+            with Image.open(ordered_images[0].path) as image:
                 if image.format != "PNG":
                     raise ValueError(
-                        f"input is not PNG data: {ordered_image.path.name}"
+                        f"input is not PNG data: {ordered_images[0].path.name}"
                     )
-                source_sizes[image.size] += 1
-                has_alpha = _has_alpha(image)
-                if has_alpha:
-                    source_alpha_files += 1
-                elif not overwrite_alpha_mask:
-                    raise ValueError(
-                        "input PNG has no alpha channel or transparency data: "
-                        f"{ordered_image.path.name}"
-                    )
-                if overwrite_alpha_mask and has_alpha:
-                    reason = _untrusted_transparent_rgb_reason(image)
-                    if reason is not None:
-                        unreliable_rgb_files.append((ordered_image.path.name, reason))
+                source_size = image.size
         except (UnidentifiedImageError, OSError) as exc:
             raise ValueError(
-                f"could not decode PNG image: {ordered_image.path.name}"
+                f"could not read PNG header: {ordered_images[0].path.name}"
             ) from exc
+    else:
+        source_sizes: Counter[tuple[int, int]] = Counter()
+        for ordered_image in tqdm(
+            ordered_images,
+            desc="Validating full-resolution source PNGs",
+            unit="image",
+        ):
+            try:
+                with Image.open(ordered_image.path) as image:
+                    image.load()
+                    if image.format != "PNG":
+                        raise ValueError(
+                            f"input is not PNG data: {ordered_image.path.name}"
+                        )
+                    source_sizes[image.size] += 1
+                    has_alpha = _has_alpha(image)
+                    if has_alpha:
+                        source_alpha_files += 1
+                    elif not overwrite_alpha_mask:
+                        raise ValueError(
+                            "input PNG has no alpha channel or transparency data: "
+                            f"{ordered_image.path.name}"
+                        )
+                    if overwrite_alpha_mask and has_alpha:
+                        reason = _untrusted_transparent_rgb_reason(image)
+                        if reason is not None:
+                            unreliable_rgb_files.append(
+                                (ordered_image.path.name, reason)
+                            )
+            except (UnidentifiedImageError, OSError) as exc:
+                raise ValueError(
+                    f"could not decode PNG image: {ordered_image.path.name}"
+                ) from exc
 
-    if len(source_sizes) != 1:
-        size_text = ", ".join(
-            f"{width}x{height} ({count})"
-            for (width, height), count in sorted(source_sizes.items())
-        )
-        raise ValueError(
-            f"all source images must have one resolution; found {size_text}"
-        )
-    source_size = next(iter(source_sizes))
+        if len(source_sizes) != 1:
+            size_text = ", ".join(
+                f"{width}x{height} ({count})"
+                for (width, height), count in sorted(source_sizes.items())
+            )
+            raise ValueError(
+                f"all source images must have one resolution; found {size_text}"
+            )
+        source_size = next(iter(source_sizes))
     cameras_text = input_cameras_file.read_text(encoding="utf-8")
     print("Preparing full-resolution undistortion maps...", flush=True)
     undistortion = _resolve_undistortion(
@@ -657,25 +674,26 @@ def prepare_rotgs_sequence_png(
         source_size,
         cameras_text,
     )
-    review_frames = [(item.angle, item.path) for item in ordered_images]
-    accepted = review_undistortion_web(
-        review_frames,
-        lambda image: _undistort_image(
-            image,
-            undistortion,
-            overwrite_alpha_mask,
-        ),
-        display_max_width,
-        display_max_height,
-        preserve_alpha=not overwrite_alpha_mask,
-        destination_to_source_maps=(undistortion.map_x, undistortion.map_y),
-        port=web_port,
-        context_label=review_label,
-    )
-    if not accepted:
-        raise SelectionCancelled(
-            "undistortion was rejected; no output was written"
+    if review_undistortion:
+        review_frames = [(item.angle, item.path) for item in ordered_images]
+        accepted = review_undistortion_web(
+            review_frames,
+            lambda image: _undistort_image(
+                image,
+                undistortion,
+                overwrite_alpha_mask,
+            ),
+            display_max_width,
+            display_max_height,
+            preserve_alpha=not overwrite_alpha_mask,
+            destination_to_source_maps=(undistortion.map_x, undistortion.map_y),
+            port=web_port,
+            context_label=review_label,
         )
+        if not accepted:
+            raise SelectionCancelled(
+                "undistortion was rejected; no output was written"
+            )
 
     run_warnings: list[str] = []
     if unreliable_rgb_files:
@@ -841,9 +859,12 @@ def prepare_rotgs_sequence_png(
                     raise RuntimeError(
                         f"source dimension changed for {ordered_image.path.name}"
                     )
-                if not overwrite_alpha_mask and not _has_alpha(source_image):
+                has_alpha = _has_alpha(source_image)
+                if skip_source_validation and has_alpha:
+                    source_alpha_files += 1
+                if not overwrite_alpha_mask and not has_alpha:
                     raise RuntimeError(
-                        f"source alpha disappeared for {ordered_image.path.name}"
+                        f"source alpha missing for {ordered_image.path.name}"
                     )
                 corrected_source = _undistort_image(
                     source_image,
@@ -935,6 +956,7 @@ def prepare_rotgs_sequence_png(
                 cameras_text.encode("utf-8")
             ).hexdigest(),
             "source_format": "PNG",
+            "source_validation_skipped": skip_source_validation,
             "source_alpha_available": source_alpha_files == len(ordered_images),
             "source_alpha_files": source_alpha_files,
             "source_alpha_missing_files": len(ordered_images) - source_alpha_files,
@@ -1050,8 +1072,8 @@ def prepare_rotgs_sequence_png(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Rename a 5-degree PNG sequence, crop it for RotGS, preserve its "
-            "source alpha by default or regenerate alpha, undistort by default "
+            "Rename a 5-degree PNG sequence, crop it for RotGS, regenerate its "
+            "alpha by default or preserve source alpha, undistort by default "
             "and downscale, and update cameras.txt."
         )
     )
@@ -1088,10 +1110,12 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--overwrite-alpha-mask",
-        action="store_true",
+        "--keep-source-alpha",
+        dest="overwrite_alpha_mask",
+        action="store_false",
+        default=True,
         help=(
-            "ignore any source alpha and regenerate it with background segmentation"
+            "preserve source alpha instead of regenerating it with segmentation"
         ),
     )
     parser.add_argument(
@@ -1099,14 +1123,24 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=12.0,
         help=(
-            "initial Lab background distance when overwriting alpha (default: 12)"
+            "initial Lab background distance when regenerating alpha (default: 12)"
         ),
     )
     parser.add_argument(
         "--segmentation-max-width",
         type=int,
         default=1600,
-        help="maximum mask-detection width when overwriting alpha (default: 1600)",
+        help="maximum mask-detection width when regenerating alpha (default: 1600)",
+    )
+    parser.add_argument(
+        "--review-undistortion",
+        action="store_true",
+        help="open the browser comparison to review undistortion before processing",
+    )
+    parser.add_argument(
+        "--skip-source-validation",
+        action="store_true",
+        help="skip full-resolution preflight validation of every source PNG",
     )
     parser.add_argument(
         "--display-max-width",
@@ -1150,6 +1184,8 @@ def main() -> int:
             angle_token_from_right=args.angle_token_from_right,
             square_crop=not args.keep_source_aspect,
             overwrite_alpha_mask=args.overwrite_alpha_mask,
+            review_undistortion=args.review_undistortion,
+            skip_source_validation=args.skip_source_validation,
             web_port=args.web_port,
         )
     except (
