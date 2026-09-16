@@ -800,7 +800,28 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    @staticmethod
+    def _limit_densification_mask(selected_mask, scores, max_selected):
+        """Keep the highest-gradient selections within an optional point budget."""
+        if max_selected is None:
+            return selected_mask
+        max_selected = max(0, int(max_selected))
+        selected_indices = torch.nonzero(selected_mask, as_tuple=False).flatten()
+        if selected_indices.numel() <= max_selected:
+            return selected_mask
+        if max_selected == 0:
+            return torch.zeros_like(selected_mask)
+        selected_scores = scores.flatten()[selected_indices]
+        keep = selected_indices[
+            torch.topk(selected_scores, k=max_selected, sorted=False).indices
+        ]
+        limited_mask = torch.zeros_like(selected_mask)
+        limited_mask[keep] = True
+        return limited_mask
+
+    def densify_and_split(
+        self, grads, grad_threshold, scene_extent, N=2, max_new_points=None
+    ):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -808,6 +829,14 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        max_selected = (
+            None
+            if max_new_points is None
+            else int(max_new_points) // N
+        )
+        selected_pts_mask = self._limit_densification_mask(
+            selected_pts_mask, padded_grad, max_selected
+        )
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -826,11 +855,16 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(
+        self, grads, grad_threshold, scene_extent, max_new_points=None
+    ):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent) 
+        selected_pts_mask = self._limit_densification_mask(
+            selected_pts_mask, torch.norm(grads, dim=-1), max_new_points
+        )
         
         new_xyz = self._xyz[selected_pts_mask] 
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -843,7 +877,15 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+    def densify_and_prune(
+        self,
+        max_grad,
+        min_opacity,
+        extent,
+        max_screen_size,
+        radii,
+        max_gaussians=0,
+    ):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -851,8 +893,23 @@ class GaussianModel:
             extent = self.distance
 
         self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        point_limit = int(max_gaussians) if max_gaussians > 0 else None
+        clone_budget = (
+            None
+            if point_limit is None
+            else max(0, point_limit - self.get_xyz.shape[0])
+        )
+        self.densify_and_clone(
+            grads, max_grad, extent, max_new_points=clone_budget
+        )
+        split_budget = (
+            None
+            if point_limit is None
+            else max(0, point_limit - self.get_xyz.shape[0])
+        )
+        self.densify_and_split(
+            grads, max_grad, extent, max_new_points=split_budget
+        )
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
