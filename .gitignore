@@ -24,3 +24,5 @@ Session Saves
 
 # Ignore logs folder
 logs/*
+
+analysis/*
