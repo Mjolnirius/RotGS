@@ -151,6 +151,7 @@ class MultiCameraBundleTests(unittest.TestCase):
                     source_folders,
                     source_cameras,
                     overwrite_alpha_mask=True,
+                    skip_source_validation=True,
                 )
 
             output = Path(summary["output_folder"])
@@ -168,12 +169,19 @@ class MultiCameraBundleTests(unittest.TestCase):
                 metadata["rough_camera_elevations_degrees"],
                 [5.0, 30.0, 55.0],
             )
+            self.assertTrue(metadata["source_validation_skipped"])
             self.assertTrue(
                 metadata["trainer_handoff"][
                     "legacy_train_multi_single_rasterizer_compatible"
                 ]
             )
             self.assertEqual(mocked_prepare.call_count, 3)
+            self.assertTrue(
+                all(
+                    call.kwargs["skip_source_validation"]
+                    for call in mocked_prepare.call_args_list
+                )
+            )
             labels = [
                 call.kwargs["review_label"]
                 for call in mocked_prepare.call_args_list

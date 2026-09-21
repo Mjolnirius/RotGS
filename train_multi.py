@@ -14,6 +14,7 @@ warnings.filterwarnings("ignore", message="An output with one or more elements w
 import math
 import os
 from pathlib import Path
+import re
 import sys
 import uuid
 from argparse import ArgumentParser, Namespace
@@ -26,6 +27,7 @@ from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render, set_rasterizer
 from scene import GaussianModel, Scene
 from scene.residual_predictor import ResidualPredictor
+from utils.experiment_tracking import ExperimentTracker
 from utils.general_utils import (
     plot_axis,
     plot_point_cloud,
@@ -49,6 +51,14 @@ from utils.multi_camera_dataset import (
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.cuda.is_available():
     torch.cuda.set_device(0)
+
+
+def infer_dataset_session(source_path):
+    for component in reversed(re.split(r"[\\/]+", os.path.normpath(source_path))):
+        match = re.fullmatch(r"session[_ -]?0*(\d+)", component, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def rotation_angle_for_view(viewpoint, residual_predictor, use_local_residual):
@@ -276,6 +286,7 @@ def training(
     checkpoint_iterations,
     checkpoint,
     config_args,
+    tracker,
 ):
     if not config_args.multi_camera:
         raise ValueError("train_multi.py requires --multi_camera")
@@ -316,8 +327,9 @@ def training(
     )
 
     first_iter = 0
-    prepare_output_and_logger(
-        dataset, output_name=config_args.name, config_args=config_args
+    best_foreground_psnr = tracker.get_summary(
+        "best/eval_test_foreground_psnr",
+        float("-inf"),
     )
     gaussians = GaussianModel(
         dataset.sh_degree,
@@ -465,6 +477,30 @@ def training(
     diagnostic_iterations.discard(0)
 
     for iteration in range(first_iter, opt.iterations + 1):
+        if (
+            iteration > first_iter
+            and iteration in testing_iterations
+            and iteration in checkpoint_iterations
+        ):
+            # Validation can require substantially more GPU memory than
+            # training. Keep one rolling snapshot of the last completed step.
+            recovery_iteration = iteration - 1
+            recovery_checkpoint = os.path.join(
+                scene.model_path, "chkpnt_pre_validation.pth"
+            )
+            print(
+                f"\n[ITER {recovery_iteration}] Saving pre-validation "
+                "recovery checkpoint"
+            )
+            torch.save(
+                (gaussians.capture(), recovery_iteration),
+                recovery_checkpoint,
+            )
+            residual_predictor.save_weights(
+                dataset.model_path,
+                recovery_iteration,
+            )
+
         iter_start.record()
         stage = stage_for_iteration(
             iteration,
@@ -547,6 +583,7 @@ def training(
         viewspace_point_tensor = render_pkg["viewspace_points"]
         visibility_filter = render_pkg["visibility_filter"]
         radii = render_pkg["radii"]
+        del render_pkg
 
         foreground_mask = viewpoint_cam.alpha_mask
         foreground_rgb_loss = masked_l1_loss(
@@ -596,14 +633,40 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
-            axes = torch.stack(
-                [gaussians.get_axis(index) for index in range(number_of_cameras)]
+            is_validation_iteration = iteration in testing_iterations
+            is_densification_iteration = (
+                topology_allowed
+                and geometry_iteration < opt.densify_until_iter
+                and geometry_iteration > opt.densify_from_iter
+                and geometry_iteration % opt.densification_interval == 0
             )
-            centers = torch.stack(
-                [gaussians.get_center(index) for index in range(number_of_cameras)]
+            is_opacity_reset_iteration = (
+                topology_allowed
+                and geometry_iteration < opt.densify_until_iter
+                and not config_args.disable_opacity_reset
+                and (
+                    geometry_iteration % opt.opacity_reset_interval == 0
+                    or (
+                        dataset.white_background
+                        and geometry_iteration == opt.densify_from_iter
+                    )
+                )
+            )
+            should_log = tracker.enabled and (
+                iteration % config_args.wandb_log_interval == 0
+                or is_validation_iteration
+                or is_densification_iteration
+                or is_opacity_reset_iteration
+                or iteration == opt.iterations
             )
 
             if iteration in diagnostic_iterations:
+                axes = torch.stack(
+                    [gaussians.get_axis(index) for index in range(number_of_cameras)]
+                )
+                centers = torch.stack(
+                    [gaussians.get_center(index) for index in range(number_of_cameras)]
+                )
                 plot_point_cloud(
                     gaussians.get_xyz,
                     iteration,
@@ -662,7 +725,147 @@ def training(
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            training_report(
+            metrics = {}
+            gaussian_count_before_update = gaussians.get_xyz.shape[0]
+            if should_log:
+                visible_gaussians = visibility_filter.sum().item()
+                metrics.update(
+                    {
+                        "train/stage": stage,
+                        "train/current_camera": cam_idx,
+                        "train/loss_total": loss.item(),
+                        "train/loss_image": image_loss.item(),
+                        "train/raw/foreground_l1": foreground_rgb_loss.item(),
+                        "train/raw/full_l1": full_rgb_loss.item(),
+                        "train/raw/foreground_dssim": (
+                            1.0 - foreground_ssim_value.item()
+                        ),
+                        "train/raw/alpha_l1": alpha_loss.item(),
+                        "train/raw/silhouette_iou_loss": silhouette_loss.item(),
+                        "train/raw/axis_side_regularization": axis_side_reg_loss.item(),
+                        "train/raw/center_regularization": center_reg_loss.item(),
+                        "train/raw/depth_regularization": depth_reg_loss.item(),
+                        "train/raw/phase_regularization": phase_reg_loss.item(),
+                        "train/raw/sweep_regularization": sweep_reg_loss.item(),
+                        "train/weighted/foreground_l1": (
+                            (1.0 - opt.lambda_dssim)
+                            * opt.lambda_foreground_rgb
+                            * foreground_rgb_loss.item()
+                        ),
+                        "train/weighted/foreground_dssim": (
+                            opt.lambda_dssim
+                            * (1.0 - foreground_ssim_value.item())
+                        ),
+                        "train/weighted/full_l1": (
+                            opt.lambda_full_rgb * full_rgb_loss.item()
+                        ),
+                        "train/weighted/alpha_l1": (
+                            opt.lambda_alpha * alpha_loss.item()
+                        ),
+                        "train/weighted/silhouette_iou_loss": (
+                            opt.lambda_silhouette * silhouette_loss.item()
+                        ),
+                        "train/weighted/axis_side_regularization": (
+                            config_args.lambda_axis_side_reg
+                            * axis_side_reg_loss.item()
+                        ),
+                        "train/weighted/center_regularization": (
+                            opt.lambda_center_reg * center_reg_loss.item()
+                        ),
+                        "train/weighted/depth_regularization": (
+                            config_args.lambda_depth_reg * depth_reg_loss.item()
+                        ),
+                        "train/weighted/phase_regularization": (
+                            config_args.lambda_phase_reg * phase_reg_loss.item()
+                        ),
+                        "train/weighted/sweep_regularization": (
+                            config_args.lambda_sweep_reg * sweep_reg_loss.item()
+                        ),
+                        "performance/iteration_ms": iter_start.elapsed_time(iter_end),
+                        "scene/gaussians": gaussian_count_before_update,
+                        "scene/gaussian_limit": config_args.max_gaussians,
+                        "scene/visible_gaussians": visible_gaussians,
+                        "scene/visible_fraction": (
+                            visible_gaussians / max(1, gaussian_count_before_update)
+                        ),
+                    }
+                )
+                for group in gaussians.optimizer.param_groups:
+                    metrics[f"learning_rate/{group['name']}"] = group["lr"]
+                metrics["learning_rate/exposure"] = (
+                    gaussians.exposure_optimizer.param_groups[0]["lr"]
+                )
+                metrics["learning_rate/residual"] = (
+                    residual_predictor.optimizer.param_groups[0]["lr"]
+                )
+                for camera_index in range(number_of_cameras):
+                    prefix = f"motion/camera_{camera_index:02d}"
+                    camera_tilt, camera_side, camera_center_shift = (
+                        gaussians.motion_summary(camera_index)
+                    )
+                    camera_center = gaussians.get_center(camera_index)
+                    local_residuals_deg = torch.rad2deg(
+                        residual_predictor._apply_bound(
+                            residual_predictor.residuals[camera_index]
+                        )
+                    )
+                    metrics.update(
+                        {
+                            f"{prefix}/axis_tilt_deg": camera_tilt.item(),
+                            f"{prefix}/axis_side_deg": camera_side.item(),
+                            f"{prefix}/center_shift": camera_center_shift.item(),
+                            f"{prefix}/center_x": camera_center[0].item(),
+                            f"{prefix}/center_y": camera_center[1].item(),
+                            f"{prefix}/center_z": camera_center[2].item(),
+                            f"{prefix}/depth": gaussians.get_camera_depth(
+                                camera_index
+                            ).item(),
+                            f"{prefix}/phase_deg": torch.rad2deg(
+                                residual_predictor.effective_phase_offset(
+                                    camera_index
+                                )
+                            ).item(),
+                            f"{prefix}/sweep_deg": torch.rad2deg(
+                                residual_predictor.effective_sweep_error(
+                                    camera_index
+                                )
+                            ).item(),
+                            f"{prefix}/local_residual_mean_abs_deg": (
+                                local_residuals_deg.abs().mean().item()
+                            ),
+                            f"{prefix}/local_residual_max_abs_deg": (
+                                local_residuals_deg.abs().max().item()
+                            ),
+                        }
+                    )
+
+            if is_validation_iteration:
+                # The topology update below only needs view-space gradients,
+                # visibility and radii. Release image/loss tensors before
+                # allocating validation renders.
+                del (
+                    image,
+                    rendered_alpha,
+                    gt_image,
+                    foreground_mask,
+                    image_crop,
+                    gt_crop,
+                    loss,
+                    image_loss,
+                    foreground_rgb_loss,
+                    full_rgb_loss,
+                    foreground_ssim_value,
+                    alpha_loss,
+                    silhouette_loss,
+                    center_reg_loss,
+                    axis_side_reg_loss,
+                    depth_reg_loss,
+                    phase_reg_loss,
+                    sweep_reg_loss,
+                )
+                torch.cuda.empty_cache()
+
+            report_metrics, report_media = training_report(
                 iteration,
                 testing_iterations,
                 gaussians,
@@ -671,12 +874,36 @@ def training(
                 bg,
                 residual_predictor,
                 config_args,
+                tracker,
             )
-            if iteration in saving_iterations:
+            metrics.update(report_metrics)
+            metrics.update(report_media)
+
+            test_foreground_psnr = report_metrics.get(
+                "eval/test/foreground_psnr"
+            )
+            is_best = (
+                test_foreground_psnr is not None
+                and test_foreground_psnr > best_foreground_psnr
+            )
+            if is_best:
+                best_foreground_psnr = test_foreground_psnr
+                tracker.set_summary(
+                    "best/eval_test_foreground_psnr",
+                    best_foreground_psnr,
+                )
+                tracker.set_summary("best/iteration", iteration)
+
+            needs_best_artifact = (
+                tracker.artifact_policy == "best_and_final" and is_best
+            )
+            should_save = iteration in saving_iterations or needs_best_artifact
+            if should_save:
                 print(f"\n[ITER {iteration}] Saving Gaussians")
                 scene.save(iteration)
                 residual_predictor.save_weights(dataset.model_path, iteration)
 
+            densification_metrics = {}
             if (
                 topology_allowed
                 and geometry_iteration < opt.densify_until_iter
@@ -688,10 +915,7 @@ def training(
                 gaussians.add_densification_stats(
                     viewspace_point_tensor, visibility_filter
                 )
-                if (
-                    geometry_iteration > opt.densify_from_iter
-                    and geometry_iteration % opt.densification_interval == 0
-                ):
+                if is_densification_iteration:
                     size_threshold = (
                         20
                         if (
@@ -719,14 +943,42 @@ def training(
                         f"\n[ITER {iteration}] Densification: "
                         f"{gaussians_before} -> {gaussians_after}{limit_description}"
                     )
-                if not config_args.disable_opacity_reset and (
-                    geometry_iteration % opt.opacity_reset_interval == 0
-                    or (
-                        dataset.white_background
-                        and geometry_iteration == opt.densify_from_iter
+                    densification_metrics.update(
+                        {
+                            "densification/event": 1,
+                            "densification/count_before": gaussians_before,
+                            "densification/count_after": gaussians_after,
+                            "densification/net_change": (
+                                gaussians_after - gaussians_before
+                            ),
+                            "densification/limit_reached": int(
+                                config_args.max_gaussians > 0
+                                and gaussians_after >= config_args.max_gaussians
+                            ),
+                        }
                     )
-                ):
+                if is_opacity_reset_iteration:
                     gaussians.reset_opacity()
+                    densification_metrics["densification/opacity_reset"] = 1
+
+            if should_log:
+                metrics["scene/gaussians_after_update"] = (
+                    gaussians.get_xyz.shape[0]
+                )
+                if (
+                    is_validation_iteration
+                    or is_densification_iteration
+                    or is_opacity_reset_iteration
+                ):
+                    opacity = gaussians.get_opacity
+                    metrics.update(
+                        {
+                            "scene/opacity_mean": opacity.mean().item(),
+                            "scene/opacity_min": opacity.min().item(),
+                            "scene/opacity_max": opacity.max().item(),
+                        }
+                    )
+                metrics.update(densification_metrics)
 
             if iteration < opt.iterations:
                 if not canonical_frozen:
@@ -744,6 +996,24 @@ def training(
                     scene.model_path + f"/chkpnt{iteration}.pth",
                 )
                 residual_predictor.save_weights(dataset.model_path, iteration)
+
+            if metrics:
+                tracker.log(metrics, iteration)
+
+            artifact_aliases = []
+            if tracker.artifact_policy == "best_and_final" and is_best:
+                artifact_aliases.append("best")
+            if (
+                tracker.artifact_policy in ("final", "best_and_final")
+                and iteration == opt.iterations
+            ):
+                artifact_aliases.append("final")
+            if artifact_aliases:
+                tracker.log_model_artifact(
+                    dataset.model_path,
+                    iteration,
+                    artifact_aliases,
+                )
 
 
 def prepare_output_and_logger(args, output_name="random", config_args=None):
@@ -776,9 +1046,12 @@ def training_report(
     background,
     residual_predictor,
     args,
+    tracker,
 ):
+    report_metrics = {}
+    report_media = {}
     if iteration not in testing_iterations:
-        return
+        return report_metrics, report_media
 
     torch.cuda.empty_cache()
     train_cameras = scene.getTrainCameras()
@@ -799,14 +1072,16 @@ def training_report(
             continue
         totals = {}
         counts = {}
-        for viewpoint in cameras:
+        comparison_images = []
+        for view_index, viewpoint in enumerate(cameras):
             angle = rotation_angle_for_view(
                 viewpoint,
                 residual_predictor,
                 use_local_residual=not args.wo_tiny,
             )
-            axis = gaussians.get_axis(viewpoint.cam_idx)
-            center = gaussians.get_center(viewpoint.cam_idx)
+            camera_index = viewpoint.cam_idx
+            axis = gaussians.get_axis(camera_index)
+            center = gaussians.get_center(camera_index)
             rasterizer = set_rasterizer(
                 viewpoint,
                 scene.gaussians,
@@ -838,7 +1113,7 @@ def training_report(
             silhouette_iou = 1.0 - silhouette_iou_loss(
                 render_pkg["rendered_alpha"], viewpoint.alpha_mask
             )
-            metrics = torch.stack(
+            view_metrics = torch.stack(
                 (
                     l1_loss(image, gt_image).mean(),
                     psnr(image, gt_image).mean(),
@@ -847,18 +1122,37 @@ def training_report(
                     silhouette_iou,
                 )
             ).double()
-            camera_index = viewpoint.cam_idx
             totals[camera_index] = totals.get(
-                camera_index, torch.zeros_like(metrics)
-            ) + metrics
+                camera_index, torch.zeros_like(view_metrics)
+            ) + view_metrics
             counts[camera_index] = counts.get(camera_index, 0) + 1
+
+            if tracker.enabled and view_index < 3:
+                comparison = torch.cat(
+                    (gt_image, image, torch.abs(image - gt_image)), dim=-1
+                )
+                view_name = getattr(viewpoint, "image_name", str(view_index))
+                comparison_images.append(
+                    tracker.image(
+                        comparison,
+                        caption=(
+                            f"{config['name']} camera {camera_index} view "
+                            f"{view_name}: ground truth | render | absolute error"
+                        ),
+                    )
+                )
+                del comparison
+
+            del render_pkg, image, gt_image, image_crop, gt_crop
 
         all_metrics = torch.zeros(5, dtype=torch.float64, device="cuda")
         all_count = 0
+        camera_foreground_psnr = []
         for camera_index in sorted(totals):
             camera_metrics = totals[camera_index] / counts[camera_index]
             all_metrics += totals[camera_index]
             all_count += counts[camera_index]
+            camera_foreground_psnr.append(camera_metrics[2].item())
             print(
                 f"\n[ITER {iteration}] Evaluating {config['name']} "
                 f"cam {camera_index}: L1 {camera_metrics[0]:.6f} "
@@ -867,6 +1161,17 @@ def training_report(
                 f"FG_SSIM {camera_metrics[3]:.6f} "
                 f"SIL_IOU {camera_metrics[4]:.6f}"
             )
+            prefix = f"eval/{config['name']}/camera_{camera_index:02d}"
+            report_metrics.update(
+                {
+                    f"{prefix}/l1": camera_metrics[0].item(),
+                    f"{prefix}/psnr": camera_metrics[1].item(),
+                    f"{prefix}/foreground_psnr": camera_metrics[2].item(),
+                    f"{prefix}/foreground_ssim": camera_metrics[3].item(),
+                    f"{prefix}/silhouette_iou": camera_metrics[4].item(),
+                }
+            )
+
         all_metrics /= all_count
         print(
             f"[ITER {iteration}] Evaluating {config['name']} all: "
@@ -875,8 +1180,25 @@ def training_report(
             f"FG_SSIM {all_metrics[3]:.6f} "
             f"SIL_IOU {all_metrics[4]:.6f}"
         )
-    torch.cuda.empty_cache()
+        prefix = f"eval/{config['name']}"
+        report_metrics.update(
+            {
+                f"{prefix}/l1": all_metrics[0].item(),
+                f"{prefix}/psnr": all_metrics[1].item(),
+                f"{prefix}/foreground_psnr": all_metrics[2].item(),
+                f"{prefix}/foreground_ssim": all_metrics[3].item(),
+                f"{prefix}/silhouette_iou": all_metrics[4].item(),
+                f"{prefix}/worst_camera_foreground_psnr": min(
+                    camera_foreground_psnr
+                ),
+                f"{prefix}/num_views": all_count,
+            }
+        )
+        if comparison_images:
+            report_media[f"media/{config['name']}/comparisons"] = comparison_images
 
+    torch.cuda.empty_cache()
+    return report_metrics, report_media
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Multi-camera training parameters")
@@ -1014,28 +1336,124 @@ if __name__ == "__main__":
         "--multi_camera", action="store_true", default=True
     )
     parser.add_argument("--name", type=str, default="exper")
+    parser.add_argument(
+        "--dataset_id",
+        type=str,
+        default=None,
+        help="portable dataset identifier stored in W&B",
+    )
+    parser.add_argument(
+        "--dataset_session",
+        type=int,
+        default=None,
+        help="numeric capture-session ID stored in W&B; inferred when possible",
+    )
+    parser.add_argument(
+        "--preprocessing_variant",
+        type=str,
+        default=None,
+        help="optional preprocessing label stored in W&B",
+    )
+    parser.add_argument(
+        "--wandb_mode",
+        choices=("disabled", "offline", "online"),
+        default="disabled",
+        help="W&B tracking mode; disabled preserves the original path",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=os.getenv("WANDB_PROJECT", "RotGS"),
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=os.getenv("WANDB_ENTITY", "3D-Scanning-MT"),
+    )
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--wandb_group", type=str, default=None)
+    parser.add_argument("--wandb_tags", nargs="*", default=[])
+    parser.add_argument("--wandb_notes", type=str, default=None)
+    parser.add_argument(
+        "--wandb_log_interval",
+        type=int,
+        default=10,
+        help="number of training iterations between W&B scalar logs",
+    )
+    parser.add_argument(
+        "--wandb_run_id",
+        type=str,
+        default=None,
+        help=(
+            "existing W&B run ID; inferred from the output folder only for "
+            "full checkpoint resumes"
+        ),
+    )
+    parser.add_argument(
+        "--wandb_artifacts",
+        choices=("none", "final", "best_and_final"),
+        default="none",
+        help="model artifact upload policy",
+    )
 
     args = parser.parse_args(sys.argv[1:])
+    if args.wandb_log_interval < 1:
+        parser.error("--wandb_log_interval must be at least 1")
     args.save_iterations.append(args.iterations)
 
     if args.sfm:
         args.random = False
 
-    print("Optimizing " + args.model_path)
+    dataset = lp.extract(args)
+    bundle = load_multi_camera_bundle(dataset.source_path)
+    args.reference_camera_index = select_reference_camera(
+        bundle,
+        args.reference_camera_index,
+    )
+    args.camera_count = len(bundle.passes)
+    args.camera_passes = [item.directory_name for item in bundle.passes]
+    args.camera_elevations_degrees = (
+        list(bundle.rough_elevations_degrees)
+        if bundle.rough_elevations_degrees is not None
+        else None
+    )
+    if args.dataset_id is None:
+        args.dataset_id = os.path.basename(os.path.normpath(dataset.source_path))
+    if args.dataset_session is None:
+        args.dataset_session = infer_dataset_session(dataset.source_path)
+
+    prepare_output_and_logger(
+        dataset,
+        output_name=args.name,
+        config_args=args,
+    )
+    print("Optimizing " + dataset.model_path)
+
+    # Tracker initialization happens before resetting training RNGs so the
+    # external service cannot perturb RotGS's seeded numerical path.
+    tracker = ExperimentTracker.create(args, dataset.model_path)
     safe_state(args.quiet)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
     start_time = datetime.now()
-    training(
-        lp.extract(args),
-        op.extract(args),
-        pp.extract(args),
-        args.test_iterations,
-        args.save_iterations,
-        args.checkpoint_iterations,
-        args.start_checkpoint,
-        args,
-    )
+    try:
+        training(
+            dataset,
+            op.extract(args),
+            pp.extract(args),
+            args.test_iterations,
+            args.save_iterations,
+            args.checkpoint_iterations,
+            args.start_checkpoint,
+            args,
+            tracker,
+        )
+    except BaseException:
+        tracker.finish(exit_code=1)
+        raise
+    else:
+        tracker.finish()
+
     end_time = datetime.now()
     print(f"Duration: {end_time - start_time}")
     print("\nTraining complete.")

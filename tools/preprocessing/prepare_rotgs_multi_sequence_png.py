@@ -249,6 +249,7 @@ def prepare_rotgs_multi_sequence_png(
     angle_token_from_right: int | None = None,
     square_crop: bool = True,
     overwrite_alpha_mask: bool = False,
+    skip_source_validation: bool = False,
 ) -> dict[str, Any]:
     """Prepare and atomically bundle multiple sequential camera-elevation passes."""
     started_at = time.perf_counter()
@@ -317,6 +318,7 @@ def prepare_rotgs_multi_sequence_png(
                 angle_token_from_right=angle_token_from_right,
                 square_crop=square_crop,
                 overwrite_alpha_mask=overwrite_alpha_mask,
+                skip_source_validation=skip_source_validation,
                 destination_folder=staging_root / camera_directory,
                 review_label=label,
                 print_summary=False,
@@ -421,6 +423,7 @@ def prepare_rotgs_multi_sequence_png(
                 "calibration_file"
             ],
             "undistortion_applied": True,
+            "source_validation_skipped": skip_source_validation,
             "alpha_mode": (
                 "regenerated" if overwrite_alpha_mask else "preserve_source"
             ),
@@ -588,6 +591,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="maximum mask-detection width (default: 1600)",
     )
     parser.add_argument(
+        "--skip-source-validation",
+        action="store_true",
+        help="skip full-resolution preflight validation for every camera pass",
+    )
+    parser.add_argument(
         "--display-max-width",
         type=int,
         default=1400,
@@ -635,6 +643,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             angle_token_from_right=args.angle_token_from_right,
             square_crop=not args.keep_source_aspect,
             overwrite_alpha_mask=args.overwrite_alpha_mask,
+            skip_source_validation=args.skip_source_validation,
         )
     except (
         FileNotFoundError,
