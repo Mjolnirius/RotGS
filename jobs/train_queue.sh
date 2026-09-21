@@ -16,6 +16,40 @@ readonly MIN_FREE_KIB=$((10 * 1024 * 1024))
 
 QUEUE_ATTEMPT=0
 QUEUE_FAILURES=0
+DELAY_MINUTES=0
+
+usage() {
+    echo "Usage: $0 [--delay-minutes MINUTES]"
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --delay-minutes)
+            if (( $# < 2 )); then
+                echo "ERROR: --delay-minutes requires a value." >&2
+                usage >&2
+                exit 2
+            fi
+            DELAY_MINUTES="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ! "${DELAY_MINUTES}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --delay-minutes must be a non-negative integer." >&2
+    exit 2
+fi
+readonly DELAY_MINUTES
 
 mkdir -p "${LOG_ROOT}"
 cd "${REPO_ROOT}" || exit 1
@@ -35,6 +69,12 @@ exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
     echo "ERROR: another RotGS queue is already running." >&2
     exit 1
+fi
+
+if (( DELAY_MINUTES > 0 )); then
+    echo "[$(date --iso-8601=seconds)] Queue scheduled; waiting ${DELAY_MINUTES} minute(s)."
+    sleep "$((DELAY_MINUTES * 60))"
+    echo "[$(date --iso-8601=seconds)] Delay finished; starting queue."
 fi
 
 timestamp() {

@@ -10,6 +10,12 @@ readonly REPO_ROOT="/workspaces/RotGS"
 readonly LOG_ROOT="${REPO_ROOT}/logs/train_queue/session_03"
 readonly LOCK_FILE="${REPO_ROOT}/.train_queue_gpu0.lock"
 readonly FINAL_ITERATION=30000
+readonly RETRY_COUNT=2
+readonly RETRY_DELAY_SECONDS=300
+readonly MIN_FREE_KIB=$((10 * 1024 * 1024))
+
+QUEUE_ATTEMPT=0
+QUEUE_FAILURES=0
 
 mkdir -p "${LOG_ROOT}"
 cd "${REPO_ROOT}" || exit 1
@@ -57,38 +63,89 @@ wait_for_gpu() {
     done
 }
 
+wait_for_disk_space() {
+    local output_path="$1"
+    local output_parent
+    local workspace_free
+    local output_free
+
+    output_parent="$(dirname "${output_path}")"
+    while true; do
+        workspace_free="$(df -Pk "${LOG_ROOT}" | awk 'NR == 2 { print $4 }')"
+        output_free="$(df -Pk "${output_parent}" | awk 'NR == 2 { print $4 }')"
+
+        if [[ "${workspace_free}" =~ ^[0-9]+$ \
+            && "${output_free}" =~ ^[0-9]+$ \
+            && "${workspace_free}" -ge "${MIN_FREE_KIB}" \
+            && "${output_free}" -ge "${MIN_FREE_KIB}" ]]; then
+            return
+        fi
+
+        echo "[$(timestamp)] Insufficient disk space for the next run " \
+            "(workspace=${workspace_free:-unknown} KiB, output=${output_free:-unknown} KiB); " \
+            "waiting 5 minutes."
+        sleep 300
+    done
+}
+
 run_job() {
     local label="$1"
     local output_path="$2"
     shift 2
 
     local final_model="${output_path}/point_cloud/iteration_${FINAL_ITERATION}/point_cloud.ply"
-    local log_path="${LOG_ROOT}/${label}.log"
+    local log_suffix=""
+    local log_path
     local exit_code
+    local argument_index
+    local -a command=("$@")
 
-    if [[ -f "${final_model}" && "${ROTGS_RERUN_COMPLETED:-0}" != "1" ]]; then
+    if [[ -f "${final_model}" ]] \
+        && { (( QUEUE_ATTEMPT > 0 )) || [[ "${ROTGS_RERUN_COMPLETED:-0}" != "1" ]]; }; then
         echo "[$(timestamp)] SKIP ${label}: final model already exists at ${final_model}"
         return 0
     fi
 
+    if (( QUEUE_ATTEMPT > 0 )); then
+        log_suffix=".retry-${QUEUE_ATTEMPT}"
+        for ((argument_index = 0; argument_index < ${#command[@]} - 1; argument_index++)); do
+            if [[ "${command[argument_index]}" == "--wandb_run_name" ]]; then
+                command[argument_index + 1]="${command[argument_index + 1]}-retry-${QUEUE_ATTEMPT}"
+                break
+            fi
+        done
+    fi
+    log_path="${LOG_ROOT}/${label}${log_suffix}.log"
+
+    wait_for_disk_space "${output_path}"
     wait_for_gpu
 
-    echo "[$(timestamp)] START ${label}"
+    echo "[$(timestamp)] START ${label} (attempt $((QUEUE_ATTEMPT + 1)))"
     printf 'Command:'
-    printf ' %q' "$@"
+    printf ' %q' "${command[@]}"
     printf '\nLog: %s\n' "${log_path}"
 
-    "$@" >"${log_path}" 2>&1
-    exit_code=$?
-
-    if (( exit_code == 0 )); then
-        echo "[$(timestamp)] DONE ${label}"
+    if "${command[@]}" >"${log_path}" 2>&1; then
+        exit_code=0
     else
-        echo "[$(timestamp)] FAILED ${label} (exit ${exit_code}); continuing with the next dataset."
+        exit_code=$?
+    fi
+
+    if (( exit_code == 0 )) && [[ -f "${final_model}" ]]; then
+        echo "[$(timestamp)] DONE ${label} (attempt $((QUEUE_ATTEMPT + 1)))"
+    else
+        QUEUE_FAILURES=$((QUEUE_FAILURES + 1))
+        if (( exit_code == 0 )); then
+            echo "[$(timestamp)] FAILED ${label}: command exited successfully but the final model is missing; continuing."
+        else
+            echo "[$(timestamp)] FAILED ${label} (exit ${exit_code}); continuing with the next dataset."
+        fi
     fi
 }
 
 # Calibration_03B, outdated_versions, and the *_multi_* dataset are omitted.
+
+run_all_jobs() {
 
 run_job \
     "chips-blau-down-s03-densify13k" \
@@ -342,4 +399,27 @@ run_job \
     --wandb_mode online \
     --wandb_run_name "weisswein-s03-densify13k"
 
-echo "[$(timestamp)] Queue finished."
+}
+
+run_queue_pass() {
+    QUEUE_ATTEMPT="$1"
+    QUEUE_FAILURES=0
+    echo "[$(timestamp)] Beginning queue pass $((QUEUE_ATTEMPT + 1)) of $((RETRY_COUNT + 1))."
+    run_all_jobs
+    echo "[$(timestamp)] Queue pass $((QUEUE_ATTEMPT + 1)) finished with ${QUEUE_FAILURES} incomplete job(s)."
+}
+
+run_queue_pass 0
+
+for ((retry = 1; retry <= RETRY_COUNT && QUEUE_FAILURES > 0; retry++)); do
+    echo "[$(timestamp)] Waiting ${RETRY_DELAY_SECONDS} seconds before retry pass ${retry}."
+    sleep "${RETRY_DELAY_SECONDS}"
+    run_queue_pass "${retry}"
+done
+
+if (( QUEUE_FAILURES > 0 )); then
+    echo "[$(timestamp)] Queue finished with ${QUEUE_FAILURES} job(s) still incomplete after ${RETRY_COUNT} retries."
+    exit 1
+fi
+
+echo "[$(timestamp)] Queue finished successfully."
