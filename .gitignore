@@ -6,6 +6,7 @@ diff_rasterization/dist
 tensorboard_3d
 screenshots
 output
+wandb
 
 
 # Ignore all files with the following extensions - keep dataset structure
@@ -20,3 +21,8 @@ output
 
 #Ignore following folder
 Session Saves
+
+# Ignore logs folder
+logs/*
+
+analysis/*
