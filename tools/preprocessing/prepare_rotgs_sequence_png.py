@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -61,6 +62,7 @@ SOURCE_ALPHA_SQUARE_OUTPUT_SUFFIX = "_rn_roi_sqr_PNGaS"
 REGENERATED_ALPHA_SQUARE_OUTPUT_SUFFIX = "_rn_roi_sqr_PNGaR"
 CROP_REVIEW_ANGLES = (0, 60, 120, 180, 240, 300)
 UNDISTORTED_OUTPUT_MARKER = "_und"
+TURNTABLE_ANGLE_OUTPUT_NAME = "turntable_angle_estimation"
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,46 @@ def _cameras_text_with_matrix(
     if cameras_text.endswith(("\n", "\r")):
         result += "\n"
     return result
+
+
+def _run_turntable_angle_estimation(
+    input_folder: str | Path,
+    calibration_file: str | Path,
+    output_folder: str | Path,
+    marker_size_mm: float,
+) -> None:
+    """Run the standalone estimator on the uncropped source image sequence."""
+    resolved_input = Path(input_folder).expanduser().resolve(strict=True)
+    resolved_calibration = (
+        Path(calibration_file).expanduser().resolve(strict=True)
+    )
+    resolved_output = Path(output_folder).expanduser().resolve(strict=True)
+    estimator = (
+        Path(__file__).resolve().parents[1]
+        / "calibration"
+        / "estimate_turntable_angles.py"
+    )
+    command = [
+        sys.executable,
+        str(estimator),
+        str(resolved_input),
+        "--intrinsics",
+        str(resolved_calibration),
+        "--marker-size-mm",
+        format(marker_size_mm, ".17g"),
+        "--output-dir",
+        str(resolved_output / TURNTABLE_ANGLE_OUTPUT_NAME),
+    ]
+    print(
+        "\nRunning turntable angle estimation on uncropped source images...",
+        flush=True,
+    )
+    completed = subprocess.run(command, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "turntable angle estimation failed with exit code "
+            f"{completed.returncode}; prepared output remains at {resolved_output}"
+        )
 
 
 def _load_undistortion(
@@ -1166,13 +1208,30 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="override the detected zero-based numeric token index from the right",
     )
+    parser.add_argument(
+        "--aruco-side-length-mm",
+        type=float,
+        default=None,
+        help=(
+            "physical black ArUco-square side length in mm; when provided, run "
+            "estimate_turntable_angles.py on the uncropped source images"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
     try:
-        prepare_rotgs_sequence_png(
+        if (
+            args.aruco_side_length_mm is not None
+            and (
+                not np.isfinite(args.aruco_side_length_mm)
+                or args.aruco_side_length_mm <= 0.0
+            )
+        ):
+            raise ValueError("--aruco-side-length-mm must be positive and finite")
+        summary = prepare_rotgs_sequence_png(
             args.folder_name,
             args.cameras,
             target_width=args.width,
@@ -1188,6 +1247,13 @@ def main() -> int:
             skip_source_validation=args.skip_source_validation,
             web_port=args.web_port,
         )
+        if args.aruco_side_length_mm is not None:
+            _run_turntable_angle_estimation(
+                summary["input_folder"],
+                summary["calibration_file"],
+                summary["output_folder"],
+                args.aruco_side_length_mm,
+            )
     except (
         FileNotFoundError,
         FileExistsError,
