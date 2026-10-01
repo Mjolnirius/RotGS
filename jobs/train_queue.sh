@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 
-# Sequential, disconnect-safe RotGS queue for the single-camera Session_03
-# datasets. Launch this script with nohup; it deliberately runs one GPU job at
+# Sequential, disconnect-safe RotGS queue for the Session_04 Quoellfrisch Top
+# ablation. Launch this script with nohup; it deliberately runs one GPU job at
 # a time because train.py uses CUDA device 0.
 
 set -uo pipefail
 
 readonly REPO_ROOT="/workspaces/RotGS"
-readonly LOG_ROOT="${REPO_ROOT}/logs/train_queue/session_03"
+readonly LOG_ROOT="${REPO_ROOT}/logs/train_queue/session_04_quoellfrisch_top"
 readonly LOCK_FILE="${REPO_ROOT}/.train_queue_gpu0.lock"
 readonly FINAL_ITERATION=30000
 readonly RETRY_COUNT=2
 readonly RETRY_DELAY_SECONDS=300
 readonly MIN_FREE_KIB=$((10 * 1024 * 1024))
+readonly IGNORED_GPU_PROCESS_MAX_MIB=1024
+readonly GPU_POLL_SECONDS=2
+readonly GPU_MONITOR_LOG="${LOG_ROOT}/gpu-monitor.log"
 
 QUEUE_ATTEMPT=0
 QUEUE_FAILURES=0
@@ -64,6 +67,11 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v setsid >/dev/null 2>&1; then
+    echo "ERROR: setsid is required but is not installed." >&2
+    exit 1
+fi
+
 # Prevent two copies of this queue from running simultaneously.
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
@@ -81,24 +89,87 @@ timestamp() {
     date --iso-8601=seconds
 }
 
+gpu_process_snapshot() {
+    nvidia-smi \
+        --query-compute-apps=pid,process_name,used_gpu_memory \
+        --format=csv,noheader,nounits 2>/dev/null
+}
+
+foreign_gpu_processes() {
+    local process_snapshot="$1"
+    local own_pgid="${2:-}"
+    local pid
+    local process_name
+    local used_memory
+    local process_pgid
+    local result=""
+
+    while IFS=',' read -r pid process_name used_memory; do
+        pid="${pid//[[:space:]]/}"
+        used_memory="${used_memory//[[:space:]]/}"
+        [[ -n "${pid}" ]] || continue
+
+        if [[ -n "${own_pgid}" ]]; then
+            process_pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null || true)"
+            process_pgid="${process_pgid//[[:space:]]/}"
+            if [[ "${process_pgid}" == "${own_pgid}" ]]; then
+                continue
+            fi
+        fi
+
+        # Ignore the always-on lightweight process without depending on a PID
+        # that can change after a reboot. It remains visible in the GPU log.
+        if [[ "${used_memory}" =~ ^[0-9]+$ ]] \
+            && (( used_memory <= IGNORED_GPU_PROCESS_MAX_MIB )); then
+            continue
+        fi
+
+        result+="${pid}:${process_name}:${used_memory}MiB; "
+    done <<< "${process_snapshot}"
+
+    printf '%s' "${result}"
+}
+
+log_gpu_snapshot() {
+    local label="$1"
+    local process_snapshot="$2"
+    local gpu_stats
+    local process_summary
+
+    if ! gpu_stats="$(
+        nvidia-smi \
+            --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw \
+            --format=csv,noheader,nounits 2>/dev/null
+    )"; then
+        gpu_stats="query-failed"
+    fi
+
+    process_summary="${process_snapshot//$'\n'/; }"
+    [[ -n "${process_summary}" ]] || process_summary="none"
+    printf '[%s] job=%s gpu=%s processes=%s\n' \
+        "$(timestamp)" "${label}" "${gpu_stats}" "${process_summary}" \
+        >>"${GPU_MONITOR_LOG}"
+}
+
 wait_for_gpu() {
-    local active_pids
+    local process_snapshot
+    local foreign_processes
+
     while true; do
-        if ! active_pids="$(
-            nvidia-smi \
-                --query-compute-apps=pid \
-                --format=csv,noheader,nounits 2>/dev/null
-        )"; then
+        if ! process_snapshot="$(gpu_process_snapshot)"; then
             echo "[$(timestamp)] ERROR: could not query GPU state; retrying in 60 seconds."
             sleep 60
             continue
         fi
 
-        if [[ -z "${active_pids//[[:space:]]/}" ]]; then
+        log_gpu_snapshot "waiting" "${process_snapshot}"
+        foreign_processes="$(foreign_gpu_processes "${process_snapshot}")"
+        if [[ -z "${foreign_processes}" ]]; then
             return
         fi
 
-        echo "[$(timestamp)] GPU is occupied by PID(s): ${active_pids//$'\n'/, }; waiting 60 seconds."
+        echo "[$(timestamp)] GPU has significant foreign process(es): " \
+            "${foreign_processes}waiting 60 seconds."
         sleep 60
     done
 }
@@ -138,6 +209,11 @@ run_job() {
     local log_path
     local exit_code
     local argument_index
+    local job_pid
+    local job_pgid
+    local job_paused=0
+    local process_snapshot
+    local foreign_processes
     local -a command=("$@")
 
     if [[ -f "${final_model}" ]] \
@@ -163,9 +239,51 @@ run_job() {
     echo "[$(timestamp)] START ${label} (attempt $((QUEUE_ATTEMPT + 1)))"
     printf 'Command:'
     printf ' %q' "${command[@]}"
-    printf '\nLog: %s\n' "${log_path}"
+    printf '\nLog: %s\nGPU monitor: %s\n' "${log_path}" "${GPU_MONITOR_LOG}"
 
-    if "${command[@]}" >"${log_path}" 2>&1; then
+    # Use a separate process group so only this RotGS job is paused/resumed.
+    setsid --wait "${command[@]}" >"${log_path}" 2>&1 &
+    job_pid=$!
+    job_pgid="$(ps -o pgid= -p "${job_pid}" 2>/dev/null || true)"
+    job_pgid="${job_pgid//[[:space:]]/}"
+    [[ -n "${job_pgid}" ]] || job_pgid="${job_pid}"
+
+    while kill -0 "${job_pid}" 2>/dev/null; do
+        if ! process_snapshot="$(gpu_process_snapshot)"; then
+            printf '[%s] job=%s gpu=query-failed processes=query-failed\n' \
+                "$(timestamp)" "${label}" >>"${GPU_MONITOR_LOG}"
+            sleep "${GPU_POLL_SECONDS}"
+            continue
+        fi
+
+        log_gpu_snapshot "${label}" "${process_snapshot}"
+        foreign_processes="$(
+            foreign_gpu_processes "${process_snapshot}" "${job_pgid}"
+        )"
+
+        if [[ -n "${foreign_processes}" ]] && (( job_paused == 0 )); then
+            if kill -STOP -- "-${job_pgid}" 2>/dev/null; then
+                job_paused=1
+                echo "[$(timestamp)] PAUSE ${label}: significant foreign GPU " \
+                    "process(es): ${foreign_processes}"
+            fi
+        elif [[ -z "${foreign_processes}" ]] && (( job_paused == 1 )); then
+            if kill -CONT -- "-${job_pgid}" 2>/dev/null; then
+                job_paused=0
+                echo "[$(timestamp)] RESUME ${label}: GPU is exclusive again " \
+                    "(ignoring processes using <=${IGNORED_GPU_PROCESS_MAX_MIB} MiB)."
+            fi
+        fi
+
+        sleep "${GPU_POLL_SECONDS}"
+    done
+
+    # Ensure a stopped child can be reaped if it exited during a race.
+    if (( job_paused == 1 )); then
+        kill -CONT -- "-${job_pgid}" 2>/dev/null || true
+    fi
+
+    if wait "${job_pid}"; then
         exit_code=0
     else
         exit_code=$?
@@ -185,7 +303,7 @@ run_job() {
 
 # Calibration_03B, outdated_versions, and the *_multi_* dataset are omitted.
 
-run_all_jobs() {
+run_legacy_session03_jobs() {
 
 run_job \
     "chips-blau-down-s03-densify13k" \
@@ -439,6 +557,73 @@ run_job \
     --wandb_mode online \
     --wandb_run_name "weisswein-s03-densify13k"
 
+}
+
+run_all_jobs() {
+    local dataset="/shared/datasets/3D_Scanning_MT/cleaned/Session_04/4_Quoellfrisch_Top_30d_und_rn_roi_sqr_PNGaR_1651"
+    local output_root="${REPO_ROOT}/output"
+
+    # 1. Nominal angles, local residual enabled: isolates --wo_tiny.
+    run_job \
+        "quoellfrisch-top-s04-nominal-local-residual" \
+        "${output_root}/4_Quoellfrisch_Top_30d_nominal_local_residual" \
+        uv run python train.py \
+        -s "${dataset}" \
+        --name "4_Quoellfrisch_Top_30d_nominal_local_residual" \
+        --iterations 30000 \
+        --densify_until_iter 13000 \
+        --rotation_direction 1 \
+        --max_sweep_error_deg 4 \
+        --axis_mode bounded_tilt \
+        --fixed_camera \
+        --random \
+        --wo_flow \
+        --test_iterations 5000 10000 15000 20000 25000 30000 \
+        --save_iterations 5000 10000 15000 20000 25000 30000 \
+        --checkpoint_iterations 5000 10000 15000 20000 25000 30000 \
+        --wandb_mode online \
+        --wandb_run_name "quoellfrisch-top-s04-nominal-local-residual"
+
+    # 2. TAE, local residual disabled: isolates measured initialization.
+    run_job \
+        "quoellfrisch-top-s04-tae-wo-tiny" \
+        "${output_root}/4_Quoellfrisch_Top_30d_tae_wo_tiny" \
+        uv run python train.py \
+        -s "${dataset}" \
+        --name "4_Quoellfrisch_Top_30d_tae_wo_tiny" \
+        --iterations 30000 \
+        --densify_until_iter 13000 \
+        --rotation_direction 1 \
+        --leverage_TAE \
+        --fixed_camera \
+        --random \
+        --wo_tiny \
+        --wo_flow \
+        --test_iterations 5000 10000 15000 20000 25000 30000 \
+        --save_iterations 5000 10000 15000 20000 25000 30000 \
+        --checkpoint_iterations 5000 10000 15000 20000 25000 30000 \
+        --wandb_mode online \
+        --wandb_run_name "quoellfrisch-top-s04-tae-wo-tiny"
+
+    # 3. TAE with its bounded smooth local residual enabled.
+    run_job \
+        "quoellfrisch-top-s04-tae-local-residual" \
+        "${output_root}/4_Quoellfrisch_Top_30d_tae_local_residual" \
+        uv run python train.py \
+        -s "${dataset}" \
+        --name "4_Quoellfrisch_Top_30d_tae_local_residual" \
+        --iterations 30000 \
+        --densify_until_iter 13000 \
+        --rotation_direction 1 \
+        --leverage_TAE \
+        --fixed_camera \
+        --random \
+        --wo_flow \
+        --test_iterations 5000 10000 15000 20000 25000 30000 \
+        --save_iterations 5000 10000 15000 20000 25000 30000 \
+        --checkpoint_iterations 5000 10000 15000 20000 25000 30000 \
+        --wandb_mode online \
+        --wandb_run_name "quoellfrisch-top-s04-tae-local-residual"
 }
 
 run_queue_pass() {
