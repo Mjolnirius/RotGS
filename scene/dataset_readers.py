@@ -22,6 +22,7 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from utils.general_utils import add_noise
 from scene.gaussian_model import BasicPointCloud
+from scene.tae_calibration import load_tae_calibration
 import torch
 import re
 
@@ -87,17 +88,31 @@ def readFixedCameras(
     cam_idx=0,
     angle_noise_std=0.0,
     rotation_direction=-1,
+    tae_calibration=None,
 ):
     cam_infos = []
     images_paths = [i for i in os.listdir(images_folder) if i.endswith(('.jpg', '.png', 'jpeg'))]
     images_paths = sorted(images_paths)
     if rotation_direction not in {-1, 1}:
         raise ValueError("rotation_direction must be either -1 or 1")
-    angle_array = torch.linspace(
-        0,
-        rotation_direction * 2 * np.pi,
-        steps=len(images_paths),
-    )
+    if tae_calibration is None:
+        angle_array = torch.linspace(
+            0,
+            rotation_direction * 2 * np.pi,
+            steps=len(images_paths),
+        )
+        tae_start_deg = None
+        tae_total_deg = None
+    else:
+        if angle_noise_std > 0:
+            raise ValueError(
+                "--angle_noise_std cannot be combined with --leverage_TAE"
+            )
+        tae_start_deg = tae_calibration.angles_by_image_deg[images_paths[0]]
+        tae_total_deg = tae_calibration.measured_total_rotation_deg
+        if tae_total_deg <= 0.0:
+            raise ValueError("TAE measured rotation must be positive")
+        angle_array = None
     direction_label = (
         "counter-clockwise (+)" if rotation_direction > 0 else "clockwise (-)"
     )
@@ -106,7 +121,12 @@ def readFixedCameras(
         raise ValueError(
             "angle_noise_std must be a finite value greater than or equal to zero"
         )
-    if angle_noise_std > 0:
+    if tae_calibration is not None:
+        print(
+            "Use TAE physical per-frame angles: "
+            f"0..{tae_total_deg:.6f} degrees from {tae_calibration.directory}"
+        )
+    elif angle_noise_std > 0:
         angle_array = add_noise(
             angle_array,
             noise_std=angle_noise_std,
@@ -122,10 +142,19 @@ def readFixedCameras(
         intr = cam_intrinsics[1] 
         height = intr.height
         width = intr.width
-        match = re.search(r'(\d+)\.(jpg|png)$', img) # ex) image_name == 'web_cam012.jpg' -> time = 12
-        time = int(match.group(1)) if match else None
-        rotation_angle = angle_array[time]
-        normalized_time = time / (len(images_paths) - 1)
+        if tae_calibration is not None:
+            measured_deg = tae_calibration.angles_by_image_deg[img]
+            relative_deg = measured_deg - tae_start_deg
+            rotation_angle = torch.tensor(
+                np.deg2rad(rotation_direction * relative_deg),
+                dtype=torch.float32,
+            )
+            normalized_time = relative_deg / tae_total_deg
+        else:
+            match = re.search(r'(\d+)\.(jpg|png)$', img) # ex) image_name == 'web_cam012.jpg' -> time = 12
+            time = int(match.group(1)) if match else None
+            rotation_angle = angle_array[time]
+            normalized_time = time / (len(images_paths) - 1)
         uid = intr.id
         
         R = np.array([
@@ -213,6 +242,7 @@ def readFixedSceneInfo(
     eval_mode=False,
     angle_noise_std=0.0,
     rotation_direction=-1,
+    leverage_TAE=False,
 ):
     # get intrinstic parameter
     try:
@@ -237,12 +267,22 @@ def readFixedSceneInfo(
     
     # get images
     reading_dir = "images" if images == None else images
+    images_folder = os.path.join(path, reading_dir)
+    tae_calibration = None
+    if leverage_TAE:
+        image_names = sorted(
+            filename
+            for filename in os.listdir(images_folder)
+            if filename.lower().endswith((".jpg", ".jpeg", ".png"))
+        )
+        tae_calibration = load_tae_calibration(path, image_names=image_names)
     cam_infos_unsorted, distance = readFixedCameras(
         cam_intrinsics=cam_intrinsics,
-        images_folder=os.path.join(path, reading_dir),
+        images_folder=images_folder,
         test_cam_names_list=test_cam_names_list,
         angle_noise_std=angle_noise_std,
         rotation_direction=rotation_direction,
+        tae_calibration=tae_calibration,
     )
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 

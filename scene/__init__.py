@@ -48,7 +48,12 @@ class Scene:
         if self.fixed_camera :
             angle_noise_std = getattr(args, "angle_noise_std", 0.0)
             rotation_direction = getattr(args, "rotation_direction", -1)
+            leverage_TAE = getattr(args, "leverage_TAE", False)
             if self.multi_camera:
+                if leverage_TAE:
+                    raise ValueError(
+                        "--leverage_TAE currently supports one fixed camera"
+                    )
                 print("Multiple cameras system !")
                 scene_info = sceneLoadTypeCallbacks["Multi"](
                     args.source_path,
@@ -71,6 +76,7 @@ class Scene:
                     eval_mode=eval_mode,
                     angle_noise_std=angle_noise_std,
                     rotation_direction=rotation_direction,
+                    leverage_TAE=leverage_TAE,
                 )
             gaussians.distance = scene_info.distance
         else:

@@ -84,7 +84,9 @@ class GaussianModel:
         axis_tilt_init_deg=30.0,
         axis_tilt_min_deg=0.0,
         axis_tilt_max_deg=90.0,
+        axis_side_init_deg=0.0,
         axis_side_limit_deg=5.0,
+        rotation_center_camera_mm=None,
         center_max_offset=0.25,
         center_warmup_iterations=2000,
     ):
@@ -116,6 +118,8 @@ class GaussianModel:
             raise ValueError("axis tilt bounds must satisfy 0 <= min < max <= 180")
         if not axis_tilt_min_deg <= axis_tilt_init_deg <= axis_tilt_max_deg:
             raise ValueError("initial axis tilt must lie inside the configured bounds")
+        if not -90 < axis_side_init_deg < 90:
+            raise ValueError("axis_side_init_deg must lie in (-90, 90)")
         if not 0 <= axis_side_limit_deg < 90:
             raise ValueError("axis_side_limit_deg must lie in [0, 90)")
         if center_max_offset < 0:
@@ -126,14 +130,29 @@ class GaussianModel:
         self.axis_tilt_init_deg = float(axis_tilt_init_deg)
         self.axis_tilt_min_rad = math.radians(axis_tilt_min_deg)
         self.axis_tilt_max_rad = math.radians(axis_tilt_max_deg)
+        self.axis_side_init_rad = math.radians(axis_side_init_deg)
         self.axis_side_limit_rad = math.radians(axis_side_limit_deg)
+        self.rotation_center_camera_mm = (
+            None
+            if rotation_center_camera_mm is None
+            else np.asarray(rotation_center_camera_mm, dtype=np.float32)
+        )
+        if (
+            self.rotation_center_camera_mm is not None
+            and self.rotation_center_camera_mm.shape != (3,)
+        ):
+            raise ValueError("rotation_center_camera_mm must contain three values")
         self.center_max_offset = float(center_max_offset)
         self.center_warmup_iterations = int(center_warmup_iterations)
         self.multi_camera = multi_camera
         self.number_of_cameras = number_of_cameras
         if self.axis_mode == "bounded_tilt":
             tilt = math.radians(self.axis_tilt_init_deg)
-            axis_init = torch.tensor([0.0, math.cos(tilt), math.sin(tilt)])
+            side = self.axis_side_init_rad
+            cos_side = math.cos(side)
+            axis_init = torch.tensor(
+                [math.sin(side), cos_side * math.cos(tilt), cos_side * math.sin(tilt)]
+            )
         else:
             axis_init = torch.tensor([0.0, 1.0, 0.0])
         center_point_init = torch.tensor([0.0, 0.0, 0.0])  # shape (3,)
@@ -248,7 +267,9 @@ class GaussianModel:
         side = torch.asin(torch.clamp(axis[0], -1.0, 1.0))
         tilt = torch.atan2(axis[2], axis[1])
         side = torch.clamp(
-            side, -self.axis_side_limit_rad, self.axis_side_limit_rad
+            side,
+            self.axis_side_init_rad - self.axis_side_limit_rad,
+            self.axis_side_init_rad + self.axis_side_limit_rad,
         )
         tilt = torch.clamp(tilt, self.axis_tilt_min_rad, self.axis_tilt_max_rad)
         cos_side = torch.cos(side)
@@ -416,6 +437,15 @@ class GaussianModel:
             if image_center is not None:
                 center_point_np = image_center
                 center_source = "alpha-mask centroid"
+            if self.rotation_center_camera_mm is not None:
+                reference_camera = cam_infos[0]
+                camera_center = self.rotation_center_camera_mm * (
+                    self.distance / self.rotation_center_camera_mm[2]
+                )
+                center_point_np = np.asarray(reference_camera.R) @ (
+                    camera_center - np.asarray(reference_camera.T)
+                )
+                center_source = "TAE physical rotation centre"
         center_point = torch.tensor(center_point_np).float().cuda()
         if self.multi_camera: # Camera numbers increase from front view to top view
             if self.number_of_cameras == 7: # axis initialization for multi-camera system
@@ -436,8 +466,14 @@ class GaussianModel:
 
         if self.axis_mode == "bounded_tilt":
             tilt = math.radians(self.axis_tilt_init_deg)
+            side = self.axis_side_init_rad
+            cos_side = math.cos(side)
             bounded_axis = torch.tensor(
-                [0.0, math.cos(tilt), math.sin(tilt)],
+                [
+                    math.sin(side),
+                    cos_side * math.cos(tilt),
+                    cos_side * math.sin(tilt),
+                ],
                 dtype=torch.float,
                 device="cuda",
             )

@@ -59,6 +59,7 @@ class ModelParams(ParamGroup):
         self.eval = True
         self.angle_noise_std = 0.0
         self.rotation_direction = -1
+        self.leverage_TAE = False
         self.legacy_centered_projection = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -108,6 +109,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_full_rgb = 0.1
         self.lambda_alpha = 0.1
         self.lambda_center_reg = 0.01
+        self.lambda_tae_angle_prior = 0.0001
         self.ssim_crop_padding = 8
         self.lambda_flow = 0.5
         self.flow_schedule_lambda = 3

@@ -44,6 +44,7 @@ def render_360_video(
         axis_tilt_init_deg=getattr(args, "axis_tilt_init_deg", 30.0),
         axis_tilt_min_deg=getattr(args, "axis_tilt_min_deg", 0.0),
         axis_tilt_max_deg=getattr(args, "axis_tilt_max_deg", 90.0),
+        axis_side_init_deg=getattr(args, "axis_side_init_deg", 0.0),
         axis_side_limit_deg=getattr(args, "axis_side_limit_deg", 5.0),
         center_max_offset=getattr(args, "center_max_offset", 0.25),
         center_warmup_iterations=getattr(args, "center_warmup_iterations", 2000),
@@ -60,8 +61,14 @@ def render_360_video(
     )
     residual_predictor = ResidualPredictor(
         1,
+        num_ctrl_points=(
+            getattr(args, "tae_residual_control_points", 8)
+            if getattr(args, "leverage_TAE", False)
+            else 1
+        ),
         max_residual_angle_deg=getattr(args, "max_residual_angle_deg", 0.0),
         max_sweep_error_deg=getattr(args, "max_sweep_error_deg", 0.0),
+        anchor_local_endpoints=getattr(args, "leverage_TAE", False),
     )
     residual_predictor.load_weights(
         dataset.model_path,
@@ -105,6 +112,7 @@ def render_360_video(
         writer.release()
         raise ValueError("rotation direction must be -1 or 1")
     use_local_residual = not getattr(args, "wo_tiny", False)
+    use_observation_correction = not getattr(args, "leverage_TAE", False)
     axis = gaussians.get_axis(0)
     center = gaussians.get_center(0)
 
@@ -118,11 +126,13 @@ def render_360_video(
                     device="cuda",
                 )
                 time = torch.tensor(fraction, dtype=torch.float32, device="cuda")
-                angle = coarse_angle + residual_predictor.angle_correction(
-                    time,
-                    0,
-                    use_local_residual=use_local_residual,
-                )
+                angle = coarse_angle
+                if use_observation_correction:
+                    angle = angle + residual_predictor.angle_correction(
+                        time,
+                        0,
+                        use_local_residual=use_local_residual,
+                    )
                 image = render(
                     rasterizer,
                     gaussians,
@@ -168,6 +178,7 @@ def main() -> int:
     parser.add_argument("--axis_tilt_init_deg", type=float, default=None)
     parser.add_argument("--axis_tilt_min_deg", type=float, default=None)
     parser.add_argument("--axis_tilt_max_deg", type=float, default=None)
+    parser.add_argument("--axis_side_init_deg", type=float, default=None)
     parser.add_argument("--axis_side_limit_deg", type=float, default=None)
     parser.add_argument("--center_max_offset", type=float, default=None)
     parser.add_argument("--center_warmup_iterations", type=int, default=None)

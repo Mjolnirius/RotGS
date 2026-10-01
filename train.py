@@ -11,6 +11,10 @@
 import warnings
 warnings.filterwarnings("ignore", message="An output with one or more elements was resized")
 from scene.residual_predictor import ResidualPredictor
+from scene.tae_calibration import (
+    configure_tae_training_args,
+    load_tae_calibration,
+)
 import os
 import re
 import torch
@@ -84,6 +88,11 @@ def training(
         "best/eval_test_foreground_psnr",
         float("-inf"),
     )
+    tae_calibration = (
+        load_tae_calibration(dataset.source_path)
+        if getattr(dataset, "leverage_TAE", False)
+        else None
+    )
     gaussians = GaussianModel(
         dataset.sh_degree,
         optimizer_type=opt.optimizer_type,
@@ -97,7 +106,13 @@ def training(
         axis_tilt_init_deg=args.axis_tilt_init_deg,
         axis_tilt_min_deg=args.axis_tilt_min_deg,
         axis_tilt_max_deg=args.axis_tilt_max_deg,
+        axis_side_init_deg=args.axis_side_init_deg,
         axis_side_limit_deg=args.axis_side_limit_deg,
+        rotation_center_camera_mm=(
+            tae_calibration.rotation_center_camera_mm
+            if tae_calibration is not None
+            else None
+        ),
         center_max_offset=args.center_max_offset,
         center_warmup_iterations=args.center_warmup_iterations,
     )
@@ -112,8 +127,14 @@ def training(
     )
     residual_predictor = ResidualPredictor(
         number_of_cameras,
+        num_ctrl_points=(
+            args.tae_residual_control_points
+            if getattr(dataset, "leverage_TAE", False)
+            else 1
+        ),
         max_residual_angle_deg=args.max_residual_angle_deg,
         max_sweep_error_deg=args.max_sweep_error_deg,
+        anchor_local_endpoints=getattr(dataset, "leverage_TAE", False),
     )
     residual_predictor.train_setting(opt)
 
@@ -166,6 +187,7 @@ def training(
         "lambda_full_rgb": opt.lambda_full_rgb,
         "lambda_alpha": opt.lambda_alpha,
         "lambda_center_reg": opt.lambda_center_reg,
+        "lambda_tae_angle_prior": opt.lambda_tae_angle_prior,
         "lambda_flow": opt.lambda_flow,
     }
     for option_name, option_value in nonnegative_options.items():
@@ -370,6 +392,13 @@ def training(
         foreground_ssim_value = ssim(image_crop, gt_crop)
         predicted_alpha = rendered_alpha.squeeze()
         alpha_loss = l1_loss(predicted_alpha, foreground_mask)
+        angle_prior_loss = (
+            residual_predictor.regularization_loss(
+                use_local_residual=not args.wo_tiny
+            )
+            if getattr(dataset, "leverage_TAE", False)
+            else image.new_zeros(())
+        )
         center_reg_loss = gaussians.motion_regularization()
 
         # flow Loss
@@ -401,6 +430,7 @@ def training(
             image_loss
             + opt.lambda_flow * flow_loss
             + opt.lambda_center_reg * center_reg_loss
+            + opt.lambda_tae_angle_prior * angle_prior_loss
         )
         loss.backward()
         iter_end.record()
@@ -468,6 +498,7 @@ def training(
                 alpha_l1 = alpha_loss.item()
                 flow_value = flow_loss.item()
                 center_regularization = center_reg_loss.item()
+                tae_angle_prior = angle_prior_loss.item()
                 visible_gaussians = visibility_filter.sum().item()
                 metrics.update({
                     "train/loss_total": loss.item(),
@@ -478,6 +509,7 @@ def training(
                     "train/raw/alpha_l1": alpha_l1,
                     "train/raw/flow": flow_value,
                     "train/raw/center_regularization": center_regularization,
+                    "train/raw/tae_angle_prior": tae_angle_prior,
                     "train/weighted/foreground_l1": (
                         (1.0 - opt.lambda_dssim)
                         * opt.lambda_foreground_rgb
@@ -491,6 +523,9 @@ def training(
                     "train/weighted/flow": opt.lambda_flow * flow_value,
                     "train/weighted/center_regularization": (
                         opt.lambda_center_reg * center_regularization
+                    ),
+                    "train/weighted/tae_angle_prior": (
+                        opt.lambda_tae_angle_prior * tae_angle_prior
                     ),
                     "performance/iteration_ms": elapsed_ms,
                     "scene/gaussians": gaussian_count_before_update,
@@ -538,6 +573,7 @@ def training(
                     foreground_ssim_value,
                     alpha_loss,
                     center_reg_loss,
+                    angle_prior_loss,
                     flow_loss,
                 )
                 if use_flow_this_iteration:
@@ -885,6 +921,7 @@ if __name__ == "__main__":
     parser.add_argument("--axis_tilt_init_deg", type=float, default=30.0)
     parser.add_argument("--axis_tilt_min_deg", type=float, default=0.0)
     parser.add_argument("--axis_tilt_max_deg", type=float, default=90.0)
+    parser.add_argument("--axis_side_init_deg", type=float, default=0.0)
     parser.add_argument("--axis_side_limit_deg", type=float, default=5.0)
     parser.add_argument("--center_max_offset", type=float, default=0.25)
     parser.add_argument("--center_warmup_iterations", type=int, default=2000)
@@ -957,6 +994,11 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args(sys.argv[1:])
+    explicit_options = {
+        token.split("=", 1)[0]
+        for token in sys.argv[1:]
+        if token.startswith("--")
+    }
     if args.max_gaussians < 1:
         parser.error("--max_gaussians must be at least 1")
     if args.wandb_log_interval < 1:
@@ -967,6 +1009,24 @@ if __name__ == "__main__":
         args.random = False
 
     dataset = lp.extract(args)
+    if getattr(dataset, "leverage_TAE", False):
+        try:
+            tae_calibration = configure_tae_training_args(
+                args,
+                dataset.source_path,
+                explicit_options=explicit_options,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(
+            "Leverage TAE: "
+            f"measured sweep={tae_calibration.measured_total_rotation_deg:.6f} deg, "
+            f"max uncertainty={tae_calibration.maximum_angle_uncertainty_deg:.6f} deg, "
+            f"local bound=+/-{args.tae_local_correction_bound_deg:g} deg, "
+            f"sweep bound=+/-{args.max_sweep_error_deg:g} deg, "
+            f"axis tilt={args.axis_tilt_init_deg:.6f} deg, "
+            f"axis side={args.axis_side_init_deg:.6f} deg"
+        )
     if args.dataset_id is None:
         args.dataset_id = os.path.basename(os.path.normpath(dataset.source_path))
     if args.dataset_session is None:

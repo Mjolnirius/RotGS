@@ -15,8 +15,11 @@ class ResidualPredictor(nn.Module):
         device="cuda",
         max_residual_angle_deg=0.0,
         max_sweep_error_deg=0.0,
+        anchor_local_endpoints=False,
     ):
         super().__init__()
+        if num_ctrl_points < 1:
+            raise ValueError("num_ctrl_points must be at least 1")
         if max_residual_angle_deg < 0:
             raise ValueError("max_residual_angle_deg must be greater than or equal to 0")
         if max_sweep_error_deg < 0:
@@ -29,6 +32,7 @@ class ResidualPredictor(nn.Module):
             else None
         )
         self.max_sweep_error_rad = math.radians(max_sweep_error_deg)
+        self.anchor_local_endpoints = bool(anchor_local_endpoints)
         self.residuals = nn.Parameter(
             torch.zeros(number_of_cameras, num_ctrl_points + 1, device=device)
         )
@@ -120,7 +124,32 @@ class ResidualPredictor(nn.Module):
         alpha = (time - t0) / (t1 - t0 + 1e-8)
         residual_t = (1 - alpha) * r0 + alpha * r1
 
-        return self._apply_bound(residual_t)
+        residual_t = self._apply_bound(residual_t)
+        if self.anchor_local_endpoints:
+            residual_t = residual_t * (4.0 * time * (1.0 - time))
+        return residual_t
+
+    def regularization_loss(self, use_local_residual: bool) -> torch.Tensor:
+        """Zero-centred magnitude and smoothness prior for angle corrections."""
+        loss = self.residuals.sum() * 0.0
+        if self.max_sweep_error_rad > 0:
+            sweep = torch.stack(
+                [
+                    self.effective_sweep_error(cam_idx)
+                    for cam_idx in range(self.sweep_error.shape[0])
+                ]
+            )
+            loss = loss + torch.mean(
+                (sweep / self.max_sweep_error_rad).square()
+            )
+        if use_local_residual and self.max_residual_angle_rad is not None:
+            local = self._apply_bound(self.residuals)
+            normalized = local / self.max_residual_angle_rad
+            loss = loss + torch.mean(normalized.square())
+            if normalized.shape[1] >= 3:
+                second_difference = normalized[:, 2:] - 2 * normalized[:, 1:-1] + normalized[:, :-2]
+                loss = loss + torch.mean(second_difference.square())
+        return loss
 
     def _apply_bound(self, residual: torch.Tensor) -> torch.Tensor:
         if self.max_residual_angle_rad is None:

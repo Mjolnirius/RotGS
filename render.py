@@ -82,6 +82,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             axis_tilt_init_deg=getattr(args, "axis_tilt_init_deg", 30.0),
             axis_tilt_min_deg=getattr(args, "axis_tilt_min_deg", 0.0),
             axis_tilt_max_deg=getattr(args, "axis_tilt_max_deg", 90.0),
+            axis_side_init_deg=getattr(args, "axis_side_init_deg", 0.0),
             axis_side_limit_deg=getattr(args, "axis_side_limit_deg", 5.0),
             center_max_offset=getattr(args, "center_max_offset", 0.25),
             center_warmup_iterations=getattr(args, "center_warmup_iterations", 2000),
@@ -89,8 +90,14 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         scene = Scene(dataset, gaussians, args.fixed_camera, load_iteration=iteration, shuffle=False, random_init=True, multi_camera=args.multi_camera, eval_mode=True)
         residual_predictor = ResidualPredictor(
             number_of_cameras,
+            num_ctrl_points=(
+                getattr(args, "tae_residual_control_points", 8)
+                if getattr(args, "leverage_TAE", False)
+                else 1
+            ),
             max_residual_angle_deg=getattr(args, "max_residual_angle_deg", 0.0),
             max_sweep_error_deg=getattr(args, "max_sweep_error_deg", 0.0),
+            anchor_local_endpoints=getattr(args, "leverage_TAE", False),
         )
         residual_predictor.load_weights(dataset.model_path, iteration=scene.loaded_iter)
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
@@ -129,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument("--axis_tilt_init_deg", type=float, default=None)
     parser.add_argument("--axis_tilt_min_deg", type=float, default=None)
     parser.add_argument("--axis_tilt_max_deg", type=float, default=None)
+    parser.add_argument("--axis_side_init_deg", type=float, default=None)
     parser.add_argument("--axis_side_limit_deg", type=float, default=None)
     parser.add_argument("--center_max_offset", type=float, default=None)
     parser.add_argument("--center_warmup_iterations", type=int, default=None)
