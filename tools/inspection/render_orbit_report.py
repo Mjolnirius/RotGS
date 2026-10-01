@@ -12,9 +12,15 @@ import sys
 from types import SimpleNamespace
 
 import imageio.v2 as imageio
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import numpy as np
 import torch
 from PIL import Image
+from plyfile import PlyData
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -369,6 +375,7 @@ def render_model(
         axis_tilt_init_deg=getattr(cfg, "axis_tilt_init_deg", 30.0),
         axis_tilt_min_deg=getattr(cfg, "axis_tilt_min_deg", 0.0),
         axis_tilt_max_deg=getattr(cfg, "axis_tilt_max_deg", 90.0),
+        axis_side_init_deg=getattr(cfg, "axis_side_init_deg", 0.0),
         axis_side_limit_deg=getattr(cfg, "axis_side_limit_deg", 5.0),
         center_max_offset=getattr(cfg, "center_max_offset", 0.25),
         center_warmup_iterations=getattr(
@@ -454,6 +461,7 @@ def render_model(
         "axis": axis.tolist(),
         "center": center.tolist(),
         "canonical_z": canonical_z.tolist(),
+        "canonical_front": canonical_front.tolist(),
         "source_elevation_deg": source_elevation,
         "camera_distance": camera_distance,
         "width": int(template.image_width),
@@ -624,6 +632,209 @@ def relative_media_path(product, filename):
     return f"media/{product['name']}/{filename}"
 
 
+def local_gaussian_centers(product):
+    """Express saved centers in a right-handed, axis-aligned model frame."""
+    checkpoint = (
+        Path(product["model_path"])
+        / "point_cloud"
+        / f"iteration_{product['iteration']}"
+        / "point_cloud.ply"
+    )
+    vertex = PlyData.read(str(checkpoint))["vertex"]
+    xyz = np.column_stack(
+        [np.asarray(vertex[name]) for name in ("x", "y", "z")]
+    ).astype(np.float64)
+    if not len(xyz) or not np.isfinite(xyz).all():
+        raise ValueError(f"non-finite or empty Gaussian centers: {checkpoint}")
+
+    z_axis = normalise(np.asarray(product["canonical_z"], dtype=np.float64))
+    if "canonical_front" not in product:
+        raise ValueError(
+            f"report manifest lacks the camera-facing direction for {product['name']}; "
+            "rerun the report with this model included"
+        )
+    front = np.asarray(product["canonical_front"], dtype=np.float64)
+    x_axis = normalise(front - np.dot(front, z_axis) * z_axis)
+    y_axis = normalise(np.cross(z_axis, x_axis))
+    center = np.asarray(product["center"], dtype=np.float64)
+    coordinates = (xyz - center) @ np.column_stack((x_axis, y_axis, z_axis))
+    radius = np.hypot(coordinates[:, 0], coordinates[:, 1])
+    return {
+        "x": coordinates[:, 0],
+        "y": coordinates[:, 1],
+        "z": coordinates[:, 2],
+        "r": radius,
+    }
+
+
+def draw_distribution_chart(path, chart, edges, color_max, curve_max):
+    horizontal = chart["horizontal"]
+    vertical = chart["vertical"]
+    histogram = chart["histogram"]
+    total = chart["total"]
+    x_edges = edges[horizontal]
+    y_edges = edges[vertical]
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
+    x_curve = histogram.sum(axis=1) * 100 / total
+    y_curve = histogram.sum(axis=0) * 100 / total
+
+    figure = plt.figure(figsize=(8.6, 7.0), facecolor="#0f1217")
+    grid = figure.add_gridspec(
+        2, 3,
+        width_ratios=(1, 0.28, 0.055),
+        height_ratios=(0.26, 1),
+        wspace=0.08,
+        hspace=0.08,
+    )
+    top = figure.add_subplot(grid[0, 0])
+    main = figure.add_subplot(grid[1, 0], sharex=top)
+    side = figure.add_subplot(grid[1, 1], sharey=main)
+    color_axis = figure.add_subplot(grid[1, 2])
+    for axis in (top, main, side):
+        axis.set_facecolor("#111923")
+        axis.tick_params(colors="#c7d0db", labelsize=9)
+        for spine in axis.spines.values():
+            spine.set_color("#506073")
+
+    density = np.ma.masked_equal(histogram.T / total, 0)
+    colormap = plt.get_cmap("magma").copy()
+    colormap.set_bad("#111923")
+    image = main.imshow(
+        density,
+        origin="lower",
+        extent=(x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]),
+        aspect="equal",
+        interpolation="nearest",
+        cmap=colormap,
+        norm=LogNorm(vmin=1e-6, vmax=color_max),
+    )
+    main.axvline(0, color="#dbe9f6", alpha=0.6, lw=0.8)
+    main.axhline(0, color="#dbe9f6", alpha=0.6, lw=0.8)
+    top.plot(x_centers, x_curve, color="#70c9ff", lw=1.5)
+    top.fill_between(x_centers, x_curve, color="#70c9ff", alpha=0.16)
+    top.set_ylim(0, curve_max[horizontal])
+    top.set_ylabel("% / bin", color="#c7d0db", fontsize=9)
+    top.tick_params(labelbottom=False)
+    side.plot(y_curve, y_centers, color="#70c9ff", lw=1.5)
+    side.fill_betweenx(y_centers, y_curve, color="#70c9ff", alpha=0.16)
+    side.set_xlim(0, curve_max[vertical])
+    side.set_xlabel("% / bin", color="#c7d0db", fontsize=9)
+    side.tick_params(labelleft=False)
+    main.set_xlabel(f"{horizontal} (model units)", color="#edf3f9")
+    main.set_ylabel(f"{vertical} (model units)", color="#edf3f9")
+    colorbar = figure.colorbar(image, cax=color_axis)
+    colorbar.set_label("Fraction of all centers / bin (log)", color="#c7d0db", fontsize=9)
+    colorbar.ax.tick_params(colors="#c7d0db", labelsize=8)
+    figure.suptitle(chart["title"], color="#f5f7fa", fontsize=14)
+    figure.subplots_adjust(left=0.12, right=0.90, top=0.90, bottom=0.10)
+    # Equal model-unit scaling can shrink the heatmap inside its grid cell.
+    # Match both marginal axes to the final heatmap bounds pixel for pixel.
+    figure.canvas.draw()
+    main_position = main.get_position()
+    top_position = top.get_position()
+    side_position = side.get_position()
+    top.set_position(
+        [main_position.x0, top_position.y0, main_position.width, top_position.height]
+    )
+    side.set_position(
+        [side_position.x0, main_position.y0, side_position.width, main_position.height]
+    )
+    figure.savefig(path, dpi=145, facecolor=figure.get_facecolor())
+    plt.close(figure)
+
+
+def create_distribution_charts(report_dir, manifest, bins=120):
+    """Use one set of robust bin edges and scales for every included run."""
+    products = list(manifest["products"].values())
+    coordinates = {
+        product["name"]: local_gaussian_centers(product)
+        for product in products
+    }
+    edges = {}
+    for axis_name in ("x", "y", "z", "r"):
+        lower = min(
+            np.quantile(items[axis_name], 0.001)
+            for items in coordinates.values()
+        )
+        upper = max(
+            np.quantile(items[axis_name], 0.999)
+            for items in coordinates.values()
+        )
+        lower = 0.0 if axis_name == "r" else min(lower, 0.0)
+        upper = max(upper, 0.0)
+        padding = 0.03 * max(upper - lower, 1e-6)
+        edges[axis_name] = np.linspace(
+            lower if axis_name == "r" else lower - padding,
+            upper + padding,
+            bins + 1,
+        )
+
+    projections = (
+        ("x_view", "y", "z", "View along +x · y–z plane"),
+        ("y_view", "x", "z", "View along +y · x–z plane"),
+        ("z_view", "x", "y", "View along +z · x–y plane"),
+        ("radius_height", "r", "z", "Distance from rotation axis vs height"),
+    )
+    charts = {}
+    color_max = 1e-6
+    curve_max = {name: 0.0 for name in edges}
+    for product in products:
+        name = product["name"]
+        values = coordinates[name]
+        charts[name] = []
+        for key, horizontal, vertical, title in projections:
+            histogram, _, _ = np.histogram2d(
+                values[horizontal],
+                values[vertical],
+                bins=(edges[horizontal], edges[vertical]),
+            )
+            total = len(values["x"])
+            color_max = max(color_max, float(histogram.max() / total))
+            curve_max[horizontal] = max(
+                curve_max[horizontal],
+                float(histogram.sum(axis=1).max() * 100 / total),
+            )
+            curve_max[vertical] = max(
+                curve_max[vertical],
+                float(histogram.sum(axis=0).max() * 100 / total),
+            )
+            charts[name].append({
+                "key": key,
+                "horizontal": horizontal,
+                "vertical": vertical,
+                "title": title,
+                "histogram": histogram,
+                "total": total,
+                "included_percent": float(histogram.sum() * 100 / total),
+            })
+
+    curve_max = {name: max(value * 1.08, 0.01) for name, value in curve_max.items()}
+    for product in products:
+        chart_dir = report_dir / "media" / product["name"]
+        chart_dir.mkdir(parents=True, exist_ok=True)
+        product["distribution"] = {}
+        for chart in charts[product["name"]]:
+            filename = f"centers_{chart['key']}.png"
+            draw_distribution_chart(
+                chart_dir / filename, chart, edges, color_max, curve_max
+            )
+            product["distribution"][chart["key"]] = {
+                "file": filename,
+                "title": chart["title"],
+                "included_percent": chart["included_percent"],
+            }
+    manifest["distribution_settings"] = {
+        "bins_per_axis": bins,
+        "bounds_model_units": {
+            name: [float(values[0]), float(values[-1])]
+            for name, values in edges.items()
+        },
+        "shared_color_max_fraction": color_max,
+        "bounds_quantiles_per_run": [0.001, 0.999],
+    }
+
+
 def write_report(report_dir, manifest):
     products = sorted(
         manifest["products"].values(),
@@ -640,6 +851,7 @@ def write_report(report_dir, manifest):
         if preprocessing:
             preprocessing_records.append(preprocessing)
         product_details[product["name"]] = {
+            "configuration": cfg,
             "evaluation": load_evaluation_summary(
                 model_path, product["iteration"]
             ),
@@ -708,13 +920,15 @@ def write_report(report_dir, manifest):
             <dt>Camera model</dt><dd>Fixed single camera; full input resolution</dd>
             <dt>Initialization</dt><dd>Random point cloud</dd>
             <dt>Rotation</dt><dd>Counter-clockwise; learned axis and center</dd>
-            <dt>Axis constraint</dt><dd>{html.escape(joined(config_values("axis_mode")))}, 0°–90° tilt, ±5° side limit</dd>
-            <dt>Motion extras</dt><dd>Residual angle correction off; optical-flow loss off</dd>
+            <dt>Axis constraint</dt><dd>{html.escape(joined(config_values("axis_mode")))}; per-run limits below</dd>
+            <dt>Angle source</dt><dd>{sum(bool(getattr(cfg, "leverage_TAE", False)) for cfg in configurations)} TAE / {sum(not getattr(cfg, "leverage_TAE", False) for cfg in configurations)} nominal</dd>
+            <dt>Local residual</dt><dd>enabled in {sum(not getattr(cfg, "wo_tiny", False) for cfg in configurations)} of {len(configurations)} runs</dd>
+            <dt>Optical-flow loss</dt><dd>enabled in {sum(not getattr(cfg, "wo_flow", False) for cfg in configurations)} of {len(configurations)} runs</dd>
             <dt>Densification</dt><dd>iterations {joined(config_values("densify_from_iter"), lambda value: f"{value:,}")}–{joined(config_values("densify_until_iter"), lambda value: f"{value:,}")}, every {joined(config_values("densification_interval"))} steps</dd>
             <dt>Opacity reset</dt><dd>every {joined(config_values("opacity_reset_interval"), lambda value: f"{value:,}")} steps</dd>
             <dt>Gaussian cap</dt><dd>{joined(config_values("max_gaussians", 450000), lambda value: f"{value:,}")}</dd>
             <dt>Loss weights</dt><dd>foreground RGB 1.0; DSSIM 0.2; full RGB 0.1; alpha 0.1; center 0.01</dd>
-            <dt>Evaluation</dt><dd>10 held-out views at iteration 30,000</dd>
+            <dt>Evaluation</dt><dd>10 held-out views at iteration {joined(sorted({product['iteration'] for product in products}), lambda value: f"{value:,}")}</dd>
           </dl>
         </article>
         <article class="overview-card">
@@ -766,6 +980,38 @@ def write_report(report_dir, manifest):
         )
         details = product_details[product["name"]]
         evaluation = details["evaluation"]
+        cfg = details["configuration"]
+
+        distribution_cards = []
+        for key in ("x_view", "y_view", "z_view", "radius_height"):
+            chart = product.get("distribution", {}).get(key)
+            if not chart:
+                continue
+            src = html.escape(
+                relative_media_path(product, chart["file"]), quote=True
+            )
+            title = html.escape(chart["title"])
+            distribution_cards.append(
+                f'<figure class="distribution-card"><a href="{src}" target="_blank" '
+                f'rel="noopener noreferrer"><img src="{src}" loading="lazy" '
+                f'alt="{title} Gaussian center density with axis marginals"></a>'
+                f'<figcaption><strong>{title}</strong> · '
+                f'{chart["included_percent"]:.2f}% of centers inside plotted bounds</figcaption>'
+                '</figure>'
+            )
+        distribution_html = (
+            '<section class="distribution-section"><h3>Gaussian center distributions</h3>'
+            '<p class="distribution-note">Each saved Gaussian contributes one center. '
+            'Coordinates are relative to this run’s learned rotation center: '
+            '+z is the learned rotation axis, +x points toward the training camera, '
+            'and +y completes a right-handed frame. All runs use the same model-unit '
+            'bounds, bins, logarithmic heatmap scale, and marginal-curve scales. '
+            'Heatmaps show the fraction of all centers per bin; curves show percent '
+            'per bin. Sparse outliers outside the shared bounds are reported below '
+            'each plot. Radius is distance from the rotation axis.</p>'
+            f'<div class="distribution-grid">{"".join(distribution_cards)}</div></section>'
+            if distribution_cards else ""
+        )
 
         def metric_card(label, key, digits, unit=""):
             value = evaluation.get(key)
@@ -843,8 +1089,12 @@ def write_report(report_dir, manifest):
               <details><summary>Render metadata</summary>
                 <dl><dt>Learned axis</dt><dd>[{axis}]</dd><dt>Rotation center</dt><dd>[{center}]</dd>
                 <dt>Training elevation</dt><dd>{product['source_elevation_deg']:.2f}°</dd>
+                <dt>Angle source</dt><dd>{'TAE measured angles' if getattr(cfg, 'leverage_TAE', False) else 'Nominal evenly spaced angles'}</dd>
+                <dt>Local residual</dt><dd>{'Disabled' if getattr(cfg, 'wo_tiny', False) else 'Enabled'}</dd>
+                <dt>Axis tilt range</dt><dd>{getattr(cfg, 'axis_tilt_min_deg', 0.0):g}°–{getattr(cfg, 'axis_tilt_max_deg', 90.0):g}°</dd>
                 <dt>Resolution</dt><dd>{product['width']} × {product['height']}</dd></dl>
               </details>
+              {distribution_html}
               <div class="video-grid">{''.join(videos)}</div>
             </section>"""
         )
@@ -930,9 +1180,10 @@ label{color:var(--soft)}input{display:block;margin-top:7px;width:min(360px,80vw)
 .run-strip{display:grid;grid-template-columns:minmax(0,2fr) minmax(150px,.7fr) minmax(140px,.6fr);gap:10px;margin-top:20px}.run-strip>div{padding:11px 12px;background:#101820;border:1px solid var(--line);border-radius:8px}.run-strip span{display:block;color:var(--soft);font-size:12px;text-transform:uppercase;letter-spacing:.04em}.run-strip strong{display:block;margin-top:4px;font-size:14px}.run-strip a{color:var(--accent);text-decoration:none}.run-strip .unavailable{font-size:14px;text-transform:none;letter-spacing:0}
 .metric-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-top:20px}.metric{padding:12px;background:#0f1217;border:1px solid var(--line);border-radius:8px}.metric span{display:block;color:var(--soft);font-size:12px;text-transform:uppercase;letter-spacing:.04em}.metric strong{display:block;margin-top:4px;font:700 20px/1.2 ui-monospace,monospace}.gaussian-count{border-color:#365f89}.metric-context{margin:8px 0 0;color:var(--soft);font-size:13px}
 details{margin:16px 0}summary{cursor:pointer;color:var(--soft)}dl{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px}dt{color:var(--soft)}dd{margin:0;font-family:ui-monospace,monospace}
+.distribution-section{margin:22px 0 30px}.distribution-note{max-width:1100px;color:var(--soft);margin:0 0 16px}.distribution-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.distribution-card{min-width:0;margin:0;padding:12px;background:#0f1217;border:1px solid var(--line);border-radius:10px}.distribution-card img{display:block;width:100%;height:auto;border-radius:6px}.distribution-card figcaption{margin:9px 4px 1px;color:var(--soft);font-size:13px}.distribution-card figcaption strong{color:#edf3f9}
 .video-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.video-card{min-width:0;padding:16px;background:#0f1217;border-radius:10px}.video-card video{display:block;width:100%;aspect-ratio:1;background:#fff;border-radius:7px}.video-card p{min-height:3em;color:var(--soft)}.links{display:flex;gap:12px}.links a{color:var(--accent);text-decoration:none;font-weight:700}#empty{padding:60px;text-align:center;color:var(--soft)}
 @media(max-width:1200px){.overview-grid{grid-template-columns:1fr 1fr}.overview-card:last-child{grid-column:1/-1}.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:800px){.hero,.product>header{align-items:start;flex-direction:column}.hero-controls{align-items:start}.overview{padding:15px}.overview-grid{grid-template-columns:1fr}.overview-card:last-child{grid-column:auto}.run-strip{grid-template-columns:1fr}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.video-grid{grid-template-columns:1fr}.product{padding:15px}main{width:min(100% - 18px,1500px);padding-top:24px}}
+@media(max-width:800px){.hero,.product>header{align-items:start;flex-direction:column}.hero-controls{align-items:start}.overview{padding:15px}.overview-grid{grid-template-columns:1fr}.overview-card:last-child{grid-column:auto}.run-strip{grid-template-columns:1fr}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.distribution-grid,.video-grid{grid-template-columns:1fr}.product{padding:15px}main{width:min(100% - 18px,1500px);padding-top:24px}}
 """.strip()
     (report_dir / "index.html").write_text(index)
     (report_dir / "report.css").write_text(css + "\n")
@@ -1043,6 +1294,14 @@ def main():
             json.dumps(manifest, indent=2) + "\n"
         )
         write_report(report_dir, manifest)
+
+    print("Drawing Gaussian center distributions")
+    create_distribution_charts(report_dir, manifest)
+    manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+    (report_dir / "report_manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+    write_report(report_dir, manifest)
 
     print(f"Report written to: {report_dir / 'index.html'}")
     return 0
