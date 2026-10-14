@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Sequential, disconnect-safe RotGS queue for the Session_04 Quoellfrisch Top
-# ablation. Launch this script with nohup; it deliberately runs one GPU job at
-# a time because train.py uses CUDA device 0.
+# Sequential, disconnect-safe RotGS queue for the remaining Session_04
+# Quoellfrisch Top SAM31AC ablations. Launch with nohup. Before each run, GPU 0
+# must pass five consecutive idle checks. Only one training job runs at a time.
 
 set -uo pipefail
 # Keep background children in the queue's group until setsid creates their
@@ -10,10 +10,12 @@ set -uo pipefail
 set +m
 
 readonly REPO_ROOT="/workspaces/RotGS"
-readonly LOG_ROOT="${REPO_ROOT}/logs/train_queue/session_04_quoellfrisch_top"
+readonly LOG_ROOT="${REPO_ROOT}/logs/train_queue/session_04_quoellfrisch_top_sam31ac_ablation"
 readonly LOCK_FILE="${REPO_ROOT}/.train_queue_gpu0.lock"
 readonly GPU_INDEX=0
 readonly FINAL_ITERATION=30000
+# Observed maximum full-orbit error for the nominal-angle runs.
+readonly GLOBAL_SWEEP_BOUND_DEG=1.2
 readonly RETRY_COUNT=2
 readonly RETRY_DELAY_SECONDS=300
 readonly MIN_FREE_KIB=$((10 * 1024 * 1024))
@@ -631,70 +633,84 @@ run_job \
 }
 
 run_all_jobs() {
-    local dataset="/shared/datasets/3D_Scanning_MT/cleaned/Session_04/4_Quoellfrisch_Top_30d_und_rn_roi_sqr_PNGaR_1651"
-    local output_root="${REPO_ROOT}/output"
+    local top_dataset="/shared/datasets/3D_Scanning_MT/cleaned/Session_04/4_Quoellfrisch_Top_30d_SAM31AC_1435"
+    local output_root="/shared/datasets/3D_Scanning_MT/output_RotGS/session_04"
+    # Six-variant experiment plan. The first two runs are already supplied
+    # separately and are deliberately excluded from this queue:
+    # 1. TAE, LR, global +/-0.15 deg:
+    #    4_Quoellfrisch_Top_30d_SAM31AC_1435_TAE_local_residual_30k
+    # 2. TAE, noLR, global +/-0.15 deg:
+    #    4_Quoellfrisch_Top_30d_SAM31AC_1435_TAE_wo_tiny_30k
+    # Queue order: 4. TAE/LR/noGlobal, 3. TAE/noLR/noGlobal,
+    #              5. noTAE/LR, 6. noTAE/noLR.
+    # --wo_tiny disables local residuals only. A zero sweep bound disables
+    # the global correction; a nonzero bound keeps it active even with noLR.
+    # TAE also initializes the axis and center from calibration; noTAE uses
+    # the training code's nominal geometry defaults.
+    local -a common_args=(
+        --iterations "${FINAL_ITERATION}"
+        --densify_until_iter 13000
+        --resolution 1
+        --rotation_direction 1
+        --angle_noise_std 0
+        --max_residual_angle_deg 0.05
+        --center_max_offset 0.05
+        --max_gaussians 450000
+        --fixed_camera
+        --random
+        --wo_flow
+        --test_iterations 5000 10000 15000 20000 25000 30000
+        --save_iterations 5000 10000 15000 20000 25000 30000
+        --checkpoint_iterations 5000 10000 15000 20000 25000 30000
+        --wandb_mode online
+    )
 
-    # 1. Nominal angles, local residual enabled: isolates --wo_tiny.
+    # 4. Measured TAE angles, local residuals +/-0.05 deg, no global correction.
     run_job \
-        "quoellfrisch-top-s04-nominal-local-residual" \
-        "${output_root}/4_Quoellfrisch_Top_30d_nominal_local_residual" \
-        uv run python train.py \
-        -s "${dataset}" \
-        --name "4_Quoellfrisch_Top_30d_nominal_local_residual" \
-        --iterations 30000 \
-        --densify_until_iter 13000 \
-        --rotation_direction 1 \
-        --max_sweep_error_deg 4 \
-        --axis_mode bounded_tilt \
-        --fixed_camera \
-        --random \
-        --wo_flow \
-        --test_iterations 5000 10000 15000 20000 25000 30000 \
-        --save_iterations 5000 10000 15000 20000 25000 30000 \
-        --checkpoint_iterations 5000 10000 15000 20000 25000 30000 \
-        --wandb_mode online \
-        --wandb_run_name "quoellfrisch-top-s04-nominal-local-residual"
-
-    # 2. TAE, local residual disabled: isolates measured initialization.
-    run_job \
-        "quoellfrisch-top-s04-tae-wo-tiny" \
-        "${output_root}/4_Quoellfrisch_Top_30d_tae_wo_tiny" \
-        uv run python train.py \
-        -s "${dataset}" \
-        --name "4_Quoellfrisch_Top_30d_tae_wo_tiny" \
-        --iterations 30000 \
-        --densify_until_iter 13000 \
-        --rotation_direction 1 \
+        "quoellfrisch-top-s04-sam31ac1435-tae-local-residual-no-global" \
+        "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_TAE_local_residual_no_global_30k" \
+        uv run --no-sync python train.py \
+        -s "${top_dataset}" \
+        --name "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_TAE_local_residual_no_global_30k" \
+        "${common_args[@]}" \
         --leverage_TAE \
-        --fixed_camera \
-        --random \
+        --max_sweep_error_deg 0 \
+        --wandb_run_name "quoellfrisch-top-s04-sam31ac1435-tae-local-residual-no-global"
+
+    # 3. Keep measured TAE angles fixed: no local or global correction.
+    run_job \
+        "quoellfrisch-top-s04-sam31ac1435-tae-wo-tiny-no-global" \
+        "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_TAE_wo_tiny_no_global_30k" \
+        uv run --no-sync python train.py \
+        -s "${top_dataset}" \
+        --name "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_TAE_wo_tiny_no_global_30k" \
+        "${common_args[@]}" \
+        --leverage_TAE --wo_tiny \
+        --max_sweep_error_deg 0 \
+        --wandb_run_name "quoellfrisch-top-s04-sam31ac1435-tae-wo-tiny-no-global"
+
+    # 5. Nominal angles, local residuals +/-0.05 deg, global +/-1.2 deg.
+    run_job \
+        "quoellfrisch-top-s04-sam31ac1435-noTAE-LR" \
+        "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_noTAE_LR_30k" \
+        uv run --no-sync python train.py \
+        -s "${top_dataset}" \
+        --name "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_noTAE_LR_30k" \
+        "${common_args[@]}" \
+        --max_sweep_error_deg "${GLOBAL_SWEEP_BOUND_DEG}" \
+        --wandb_run_name "quoellfrisch-top-s04-sam31ac1435-noTAE-LR"
+
+    # 6. Nominal angles, no local residuals, global +/-1.2 deg.
+    run_job \
+        "quoellfrisch-top-s04-sam31ac1435-noTAE-noLR" \
+        "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_noTAE_noLR_30k" \
+        uv run --no-sync python train.py \
+        -s "${top_dataset}" \
+        --name "${output_root}/4_Quoellfrisch_Top_30d_SAM31AC_1435_noTAE_noLR_30k" \
+        "${common_args[@]}" \
         --wo_tiny \
-        --wo_flow \
-        --test_iterations 5000 10000 15000 20000 25000 30000 \
-        --save_iterations 5000 10000 15000 20000 25000 30000 \
-        --checkpoint_iterations 5000 10000 15000 20000 25000 30000 \
-        --wandb_mode online \
-        --wandb_run_name "quoellfrisch-top-s04-tae-wo-tiny"
-
-    # 3. TAE with its bounded smooth local residual enabled.
-    run_job \
-        "quoellfrisch-top-s04-tae-local-residual" \
-        "${output_root}/4_Quoellfrisch_Top_30d_tae_local_residual" \
-        uv run python train.py \
-        -s "${dataset}" \
-        --name "4_Quoellfrisch_Top_30d_tae_local_residual" \
-        --iterations 30000 \
-        --densify_until_iter 13000 \
-        --rotation_direction 1 \
-        --leverage_TAE \
-        --fixed_camera \
-        --random \
-        --wo_flow \
-        --test_iterations 5000 10000 15000 20000 25000 30000 \
-        --save_iterations 5000 10000 15000 20000 25000 30000 \
-        --checkpoint_iterations 5000 10000 15000 20000 25000 30000 \
-        --wandb_mode online \
-        --wandb_run_name "quoellfrisch-top-s04-tae-local-residual"
+        --max_sweep_error_deg "${GLOBAL_SWEEP_BOUND_DEG}" \
+        --wandb_run_name "quoellfrisch-top-s04-sam31ac1435-noTAE-noLR"
 }
 
 run_queue_pass() {
