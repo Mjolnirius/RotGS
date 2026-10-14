@@ -372,6 +372,7 @@ def render_model(
         multi_camera=False,
         number_of_cameras=1,
         axis_mode=getattr(cfg, "axis_mode", "free"),
+        axis_constraint_mode=getattr(cfg, "axis_constraint_mode", "clamp"),
         axis_tilt_init_deg=getattr(cfg, "axis_tilt_init_deg", 30.0),
         axis_tilt_min_deg=getattr(cfg, "axis_tilt_min_deg", 0.0),
         axis_tilt_max_deg=getattr(cfg, "axis_tilt_max_deg", 90.0),

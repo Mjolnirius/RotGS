@@ -81,6 +81,7 @@ class GaussianModel:
         freeze_axis=False,
         freeze_center=False,
         axis_mode="free",
+        axis_constraint_mode="clamp",
         axis_tilt_init_deg=30.0,
         axis_tilt_min_deg=0.0,
         axis_tilt_max_deg=90.0,
@@ -127,6 +128,9 @@ class GaussianModel:
         if center_warmup_iterations < 0:
             raise ValueError("center_warmup_iterations must be greater than or equal to zero")
         self.axis_mode = axis_mode
+        if axis_constraint_mode not in {"clamp", "project"}:
+            raise ValueError("axis_constraint_mode must be 'clamp' or 'project'")
+        self.axis_constraint_mode = axis_constraint_mode
         self.axis_tilt_init_deg = float(axis_tilt_init_deg)
         self.axis_tilt_min_rad = math.radians(axis_tilt_min_deg)
         self.axis_tilt_max_rad = math.radians(axis_tilt_max_deg)
@@ -224,6 +228,7 @@ class GaussianModel:
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+        self.project_axis_()
     
     @property
     def get_scaling(self):
@@ -261,7 +266,7 @@ class GaussianModel:
    
     def get_axis(self, cam_idx):
         axis = self.axis_activation(self._axis[cam_idx])
-        if self.axis_mode == "free":
+        if self.axis_mode == "free" or self.axis_constraint_mode == "project":
             return axis
 
         side = torch.asin(torch.clamp(axis[0], -1.0, 1.0))
@@ -280,6 +285,34 @@ class GaussianModel:
                 cos_side * torch.sin(tilt),
             ]
         )
+
+    @torch.no_grad()
+    def project_axis_(self):
+        """Enforce bounds after a step, without blocking inward loss gradients.
+
+        Preserve raw vector length and checkpoint layout; only constrain its
+        direction. Unlike forward hard clamps, a boundary retains its tangent
+        gradient and Adam can move back into the allowed region.
+        """
+        if self.axis_mode != "bounded_tilt" or self.axis_constraint_mode != "project":
+            return
+        lengths = self._axis.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        axes = self._axis / lengths
+        raw_sides = axes[:, 0].clamp(-1.0, 1.0).asin()
+        raw_tilts = torch.atan2(axes[:, 2], axes[:, 1])
+        sides = raw_sides.clamp(
+            self.axis_side_init_rad - self.axis_side_limit_rad,
+            self.axis_side_init_rad + self.axis_side_limit_rad,
+        )
+        tilts = raw_tilts.clamp(
+            self.axis_tilt_min_rad, self.axis_tilt_max_rad,
+        )
+        projected = torch.stack(
+            [sides.sin(), sides.cos() * tilts.cos(), sides.cos() * tilts.sin()],
+            dim=1,
+        )
+        outside = (raw_sides != sides) | (raw_tilts != tilts)
+        self._axis[outside] = (projected * lengths)[outside]
     
     def get_center(self, cam_idx):
         if self.center_max_offset == 0:
@@ -644,6 +677,7 @@ class GaussianModel:
         motion_path = os.path.join(os.path.dirname(path), "motion.json")
         motion_data = {
             "axis_mode": self.axis_mode,
+            "axis_constraint_mode": self.axis_constraint_mode,
             "axis": axis.tolist(),
             "center": center.tolist(),
             "center_initial": self._center_initial.detach().cpu().numpy().tolist(),
@@ -727,6 +761,7 @@ class GaussianModel:
                     not self.freeze_axis
                 )
             )
+            self.project_axis_()
 
         center_path = os.path.join(os.path.dirname(path), "center.npy")
         if os.path.exists(center_path):

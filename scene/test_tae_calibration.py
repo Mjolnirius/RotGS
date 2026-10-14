@@ -126,6 +126,29 @@ class TAECalibrationTest(unittest.TestCase):
         self.assertEqual(args.max_sweep_error_deg, 0.15)
         self.assertEqual(args.center_max_offset, 0.05)
 
+    def test_wider_axis_window_keeps_measured_angles_and_center(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = self.make_dataset(Path(temporary))
+            args = Namespace(multi_camera=False, angle_noise_std=0., wo_tiny=True,
+                             max_residual_angle_deg=0., max_sweep_error_deg=0.,
+                             center_max_offset=.25, tae_axis_wiggle_deg=2.)
+            calibration = configure_tae_training_args(
+                args,dataset,explicit_options={"--max_sweep_error_deg"})
+        self.assertAlmostEqual(args.axis_tilt_min_deg,calibration.axis_tilt_deg-2.)
+        self.assertAlmostEqual(args.axis_tilt_max_deg,calibration.axis_tilt_deg+2.)
+        self.assertEqual(args.axis_side_limit_deg,2.)
+        self.assertEqual(args.max_sweep_error_deg,0.)
+        self.assertEqual(args.center_max_offset,.05)
+        self.assertEqual(calibration.angles_by_image_deg["0001.png"],5.05)
+
+    def test_rejects_invalid_axis_window(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = self.make_dataset(Path(temporary))
+            for window in [0.,-1.,90.,float("nan"),float("inf")]:
+                with self.subTest(window=window), self.assertRaisesRegex(ValueError,"tae_axis_wiggle_deg"):
+                    configure_tae_training_args(
+                        Namespace(multi_camera=False,angle_noise_std=0.,tae_axis_wiggle_deg=window),dataset)
+
     def test_tae_local_correction_is_bounded_and_endpoint_anchored(self):
         predictor = ResidualPredictor(
             1,

@@ -103,6 +103,7 @@ def training(
         freeze_axis=args.freeze_axis,
         freeze_center=args.freeze_center,
         axis_mode=args.axis_mode,
+        axis_constraint_mode=args.axis_constraint_mode,
         axis_tilt_init_deg=args.axis_tilt_init_deg,
         axis_tilt_min_deg=args.axis_tilt_min_deg,
         axis_tilt_max_deg=args.axis_tilt_max_deg,
@@ -538,6 +539,10 @@ def training(
                     "motion/axis_side_deg": motion_summary[1].item(),
                     "motion/center_shift": motion_summary[2].item(),
                     "motion/sweep_error_deg": motion_summary[3].item(),
+                    "motion/axis_gradient_norm": (
+                        gaussians._axis.grad.norm().item()
+                        if gaussians._axis.grad is not None else 0.0
+                    ),
                 })
                 for group in gaussians.optimizer.param_groups:
                     metrics[f"learning_rate/{group['name']}"] = group["lr"]
@@ -677,6 +682,7 @@ def training(
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 gaussians.optimizer.step()
+                gaussians.project_axis_()
                 gaussians.optimizer.zero_grad(set_to_none = True)
                 residual_predictor.optimizer.step()
                 residual_predictor.update_learning_rate(iteration)
@@ -919,6 +925,14 @@ if __name__ == "__main__":
         help="free 3D axis or a physically bounded camera/sideways tilt axis",
     )
     parser.add_argument("--axis_tilt_init_deg", type=float, default=30.0)
+    parser.add_argument(
+        "--axis_constraint_mode", choices=("clamp", "project"), default="clamp",
+        help="bounded axis: legacy forward clamp, or projection after optimizer steps with recoverable gradients",
+    )
+    parser.add_argument(
+        "--tae_axis_wiggle_deg", type=float, default=0.5,
+        help="allowed tilt and sideways deviation in degrees around the measured TAE axis",
+    )
     parser.add_argument("--axis_tilt_min_deg", type=float, default=0.0)
     parser.add_argument("--axis_tilt_max_deg", type=float, default=90.0)
     parser.add_argument("--axis_side_init_deg", type=float, default=0.0)

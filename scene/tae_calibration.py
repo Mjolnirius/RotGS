@@ -48,11 +48,14 @@ def configure_tae_training_args(
         )
 
     args.axis_mode = "bounded_tilt"
+    axis_wiggle_deg = float(getattr(args, "tae_axis_wiggle_deg", TAE_AXIS_WIGGLE_DEG))
+    if not math.isfinite(axis_wiggle_deg) or not 0 < axis_wiggle_deg < 90:
+        raise ValueError("tae_axis_wiggle_deg must be finite and in (0, 90)")
     args.axis_tilt_init_deg = calibration.axis_tilt_deg
-    args.axis_tilt_min_deg = max(0.0, calibration.axis_tilt_deg - TAE_AXIS_WIGGLE_DEG)
-    args.axis_tilt_max_deg = min(180.0, calibration.axis_tilt_deg + TAE_AXIS_WIGGLE_DEG)
+    args.axis_tilt_min_deg = max(0.0, calibration.axis_tilt_deg - axis_wiggle_deg)
+    args.axis_tilt_max_deg = min(180.0, calibration.axis_tilt_deg + axis_wiggle_deg)
     args.axis_side_init_deg = calibration.axis_side_deg
-    args.axis_side_limit_deg = TAE_AXIS_WIGGLE_DEG
+    args.axis_side_limit_deg = axis_wiggle_deg
 
     local_bound = max(
         TAE_MIN_LOCAL_CORRECTION_DEG,

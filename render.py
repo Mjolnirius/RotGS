@@ -79,6 +79,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             multi_camera=args.multi_camera,
             number_of_cameras=number_of_cameras,
             axis_mode=getattr(args, "axis_mode", "free"),
+            axis_constraint_mode=getattr(args, "axis_constraint_mode", "clamp"),
             axis_tilt_init_deg=getattr(args, "axis_tilt_init_deg", 30.0),
             axis_tilt_min_deg=getattr(args, "axis_tilt_min_deg", 0.0),
             axis_tilt_max_deg=getattr(args, "axis_tilt_max_deg", 90.0),
@@ -134,6 +135,7 @@ if __name__ == "__main__":
         default=None,
     )
     parser.add_argument("--axis_tilt_init_deg", type=float, default=None)
+    parser.add_argument("--axis_constraint_mode", choices=("clamp", "project"), default=None)
     parser.add_argument("--axis_tilt_min_deg", type=float, default=None)
     parser.add_argument("--axis_tilt_max_deg", type=float, default=None)
     parser.add_argument("--axis_side_init_deg", type=float, default=None)
