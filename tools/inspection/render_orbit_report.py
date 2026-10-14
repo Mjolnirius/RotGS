@@ -882,8 +882,25 @@ def write_report(report_dir, manifest):
         {
             item["segmentation"]["background_threshold_lab"]
             for item in preprocessing_records
+            if "background_threshold_lab" in item.get("segmentation", {})
         }
     )
+    alpha_methods = []
+    if alpha_thresholds:
+        alpha_methods.append(
+            "Lab-background segmentation (dataset-specific thresholds "
+            + joined(alpha_thresholds, lambda value: f"{value:g}") + ")"
+        )
+    sam_backends = sorted({
+        item.get("segmentation", {}).get("backend", "")
+        for item in preprocessing_records
+        if item.get("segmentation", {}).get("backend", "").startswith("sam")
+    })
+    alpha_methods.extend(
+        backend.upper().replace("SAM", "SAM ", 1) + " product segmentation"
+        for backend in sam_backends
+    )
+    alpha_description = html.escape("; ".join(alpha_methods) or "product segmentation")
     calibrations = sorted(
         {
             Path(item["undistortion"]["calibration_file"]).parent.name
@@ -908,7 +925,7 @@ def write_report(report_dir, manifest):
             <li><strong>PNG input.</strong> {joined(image_counts)} RGBA turntable frames per dataset, angle-sorted from {angle_min}° to {angle_max}° in {angle_step}° steps and renamed sequentially.</li>
             <li><strong>Calibration.</strong> Lens undistortion with {html.escape(joined(calibrations))}, OpenCV linear interpolation, and the calibrated intrinsics retained.</li>
             <li><strong>ROI and crop.</strong> A reviewed product ROI determines a centered smallest-square crop; native square outputs span {min(output_sizes):,}–{max(output_sizes):,} px.</li>
-            <li><strong>Alpha.</strong> Alpha is regenerated after undistortion using Lab-background segmentation (dataset-specific thresholds {joined(alpha_thresholds, lambda value: f"{value:g}")}; segmentation width 1,600 px), including soft boundary pixels.</li>
+            <li><strong>Alpha.</strong> Alpha is regenerated after undistortion using {alpha_description}, including soft boundary pixels in the exported images.</li>
             <li><strong>Training inputs.</strong> Full-resolution cropped PNGs, adjusted camera intrinsics, white background, and alpha-aware supervision.</li>
           </ol>
         </article>
