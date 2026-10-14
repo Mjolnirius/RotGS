@@ -5,28 +5,39 @@
 # a time because train.py uses CUDA device 0.
 
 set -uo pipefail
+# Keep background children in the queue's group until setsid creates their
+# session. This prevents setsid from forking, so $! remains the session leader.
+set +m
 
 readonly REPO_ROOT="/workspaces/RotGS"
 readonly LOG_ROOT="${REPO_ROOT}/logs/train_queue/session_04_quoellfrisch_top"
 readonly LOCK_FILE="${REPO_ROOT}/.train_queue_gpu0.lock"
+readonly GPU_INDEX=0
 readonly FINAL_ITERATION=30000
 readonly RETRY_COUNT=2
 readonly RETRY_DELAY_SECONDS=300
 readonly MIN_FREE_KIB=$((10 * 1024 * 1024))
-readonly IGNORED_GPU_PROCESS_MAX_MIB=1024
+readonly IGNORED_GPU_PROCESS_MAX_MIB=0
+readonly GPU_IDLE_MAX_UTILIZATION=5
+readonly GPU_IDLE_REQUIRED_CHECKS=5
 readonly GPU_POLL_SECONDS=2
 readonly GPU_MONITOR_LOG="${LOG_ROOT}/gpu-monitor.log"
 
 QUEUE_ATTEMPT=0
 QUEUE_FAILURES=0
 DELAY_MINUTES=0
+DRY_RUN=0
 
 usage() {
-    echo "Usage: $0 [--delay-minutes MINUTES]"
+    echo "Usage: $0 [--delay-minutes MINUTES] [--dry-run]"
 }
 
 while (( $# > 0 )); do
     case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
         --delay-minutes)
             if (( $# < 2 )); then
                 echo "ERROR: --delay-minutes requires a value." >&2
@@ -53,36 +64,40 @@ if [[ ! "${DELAY_MINUTES}" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 readonly DELAY_MINUTES
+readonly DRY_RUN
 
-mkdir -p "${LOG_ROOT}"
 cd "${REPO_ROOT}" || exit 1
+export CUDA_VISIBLE_DEVICES="${GPU_INDEX}"
 
-if ! command -v flock >/dev/null 2>&1; then
-    echo "ERROR: flock is required but is not installed." >&2
-    exit 1
-fi
+if (( DRY_RUN == 0 )); then
+    mkdir -p "${LOG_ROOT}"
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required but is not installed." >&2
+        exit 1
+    fi
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-    echo "ERROR: nvidia-smi is required but is not installed." >&2
-    exit 1
-fi
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        echo "ERROR: nvidia-smi is required but is not installed." >&2
+        exit 1
+    fi
 
-if ! command -v setsid >/dev/null 2>&1; then
-    echo "ERROR: setsid is required but is not installed." >&2
-    exit 1
-fi
+    if ! command -v setsid >/dev/null 2>&1; then
+        echo "ERROR: setsid is required but is not installed." >&2
+        exit 1
+    fi
 
-# Prevent two copies of this queue from running simultaneously.
-exec 9>"${LOCK_FILE}"
-if ! flock -n 9; then
-    echo "ERROR: another RotGS queue is already running." >&2
-    exit 1
-fi
+    # Prevent two copies of this queue from running simultaneously.
+    exec 9>"${LOCK_FILE}"
+    if ! flock -n 9; then
+        echo "ERROR: another RotGS queue is already running." >&2
+        exit 1
+    fi
 
-if (( DELAY_MINUTES > 0 )); then
-    echo "[$(date --iso-8601=seconds)] Queue scheduled; waiting ${DELAY_MINUTES} minute(s)."
-    sleep "$((DELAY_MINUTES * 60))"
-    echo "[$(date --iso-8601=seconds)] Delay finished; starting queue."
+    if (( DELAY_MINUTES > 0 )); then
+        echo "[$(date --iso-8601=seconds)] Queue scheduled; waiting ${DELAY_MINUTES} minute(s)."
+        sleep "$((DELAY_MINUTES * 60))"
+        echo "[$(date --iso-8601=seconds)] Delay finished; starting queue."
+    fi
 fi
 
 timestamp() {
@@ -91,6 +106,7 @@ timestamp() {
 
 gpu_process_snapshot() {
     nvidia-smi \
+        --id="${GPU_INDEX}" \
         --query-compute-apps=pid,process_name,used_gpu_memory \
         --format=csv,noheader,nounits 2>/dev/null
 }
@@ -117,8 +133,7 @@ foreign_gpu_processes() {
             fi
         fi
 
-        # Ignore the always-on lightweight process without depending on a PID
-        # that can change after a reboot. It remains visible in the GPU log.
+        # Any foreign CUDA allocation blocks startup, even a small one.
         if [[ "${used_memory}" =~ ^[0-9]+$ ]] \
             && (( used_memory <= IGNORED_GPU_PROCESS_MAX_MIB )); then
             continue
@@ -138,6 +153,7 @@ log_gpu_snapshot() {
 
     if ! gpu_stats="$(
         nvidia-smi \
+            --id="${GPU_INDEX}" \
             --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw \
             --format=csv,noheader,nounits 2>/dev/null
     )"; then
@@ -154,23 +170,45 @@ log_gpu_snapshot() {
 wait_for_gpu() {
     local process_snapshot
     local foreign_processes
+    local gpu_utilization
+    local idle_checks=0
 
     while true; do
         if ! process_snapshot="$(gpu_process_snapshot)"; then
-            echo "[$(timestamp)] ERROR: could not query GPU state; retrying in 60 seconds."
-            sleep 60
+            idle_checks=0
+            echo "[$(timestamp)] ERROR: could not query GPU state; retrying in ${GPU_POLL_SECONDS} seconds."
+            sleep "${GPU_POLL_SECONDS}"
             continue
         fi
 
         log_gpu_snapshot "waiting" "${process_snapshot}"
         foreign_processes="$(foreign_gpu_processes "${process_snapshot}")"
-        if [[ -z "${foreign_processes}" ]]; then
-            return
+        if ! gpu_utilization="$(
+            nvidia-smi --id="${GPU_INDEX}" \
+                --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null
+        )"; then
+            idle_checks=0
+            echo "[$(timestamp)] ERROR: could not query GPU utilization; retrying in ${GPU_POLL_SECONDS} seconds."
+            sleep "${GPU_POLL_SECONDS}"
+            continue
+        fi
+        gpu_utilization="${gpu_utilization//[[:space:]]/}"
+        if [[ -z "${foreign_processes}" \
+            && "${gpu_utilization}" =~ ^[0-9]+$ \
+            && "${gpu_utilization}" -le "${GPU_IDLE_MAX_UTILIZATION}" ]]; then
+            idle_checks=$((idle_checks + 1))
+            echo "[$(timestamp)] GPU ${GPU_INDEX} idle check ${idle_checks}/${GPU_IDLE_REQUIRED_CHECKS}."
+            if (( idle_checks >= GPU_IDLE_REQUIRED_CHECKS )); then
+                return
+            fi
+        else
+            idle_checks=0
+            echo "[$(timestamp)] Waiting for GPU ${GPU_INDEX}: utilization=${gpu_utilization:-unknown}% " \
+                "(idle <=${GPU_IDLE_MAX_UTILIZATION}%), foreign processes=${foreign_processes:-none}; " \
+                "idle streak reset, retrying in ${GPU_POLL_SECONDS} seconds."
         fi
 
-        echo "[$(timestamp)] GPU has significant foreign process(es): " \
-            "${foreign_processes}waiting 60 seconds."
-        sleep 60
+        sleep "${GPU_POLL_SECONDS}"
     done
 }
 
@@ -199,6 +237,32 @@ wait_for_disk_space() {
     done
 }
 
+signal_job_group() {
+    local signal_name="$1"
+    local job_pid="$2"
+    local queue_pgid
+    local job_identity
+    local actual_pgid
+    local actual_sid
+
+    [[ "${job_pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+    if ! queue_pgid="$(ps -o pgid= -p "$$" 2>/dev/null)"; then
+        return 1
+    fi
+    queue_pgid="${queue_pgid//[[:space:]]/}"
+    [[ "${queue_pgid}" =~ ^[1-9][0-9]*$ \
+        && "${job_pid}" != "${queue_pgid}" ]] || return 1
+    if ! job_identity="$(ps -o pgid=,sid= -p "${job_pid}" 2>/dev/null)"; then
+        return 1
+    fi
+    read -r actual_pgid actual_sid <<< "${job_identity}"
+    # Signal only the isolated session created for this job. Never target
+    # the queue's group, including while setsid is still starting up.
+    [[ "${actual_pgid}" == "${job_pid}" \
+        && "${actual_sid}" == "${job_pid}" ]] || return 1
+    kill "-${signal_name}" -- "-${job_pid}"
+}
+
 run_job() {
     local label="$1"
     local output_path="$2"
@@ -215,6 +279,13 @@ run_job() {
     local process_snapshot
     local foreign_processes
     local -a command=("$@")
+
+    if (( DRY_RUN == 1 )); then
+        printf 'Job: %s\nOutput: %s\nCommand:' "${label}" "${output_path}"
+        printf ' %q' "${command[@]}"
+        printf '\n\n'
+        return 0
+    fi
 
     if [[ -f "${final_model}" ]] \
         && { (( QUEUE_ATTEMPT > 0 )) || [[ "${ROTGS_RERUN_COMPLETED:-0}" != "1" ]]; }; then
@@ -244,9 +315,10 @@ run_job() {
     # Use a separate process group so only this RotGS job is paused/resumed.
     setsid --wait "${command[@]}" >"${log_path}" 2>&1 &
     job_pid=$!
-    job_pgid="$(ps -o pgid= -p "${job_pid}" 2>/dev/null || true)"
-    job_pgid="${job_pgid//[[:space:]]/}"
-    [[ -n "${job_pgid}" ]] || job_pgid="${job_pid}"
+    # setsid makes this PID the new process-group/session ID. Querying ps
+    # immediately after launch can still return the queue's group, allowing
+    # a later SIGSTOP to suspend the queue itself. Never cache that group.
+    job_pgid="${job_pid}"
 
     while kill -0 "${job_pid}" 2>/dev/null; do
         if ! process_snapshot="$(gpu_process_snapshot)"; then
@@ -262,16 +334,15 @@ run_job() {
         )"
 
         if [[ -n "${foreign_processes}" ]] && (( job_paused == 0 )); then
-            if kill -STOP -- "-${job_pgid}" 2>/dev/null; then
+            if signal_job_group STOP "${job_pid}"; then
                 job_paused=1
-                echo "[$(timestamp)] PAUSE ${label}: significant foreign GPU " \
+                echo "[$(timestamp)] PAUSE ${label}: foreign GPU " \
                     "process(es): ${foreign_processes}"
             fi
         elif [[ -z "${foreign_processes}" ]] && (( job_paused == 1 )); then
-            if kill -CONT -- "-${job_pgid}" 2>/dev/null; then
+            if signal_job_group CONT "${job_pid}"; then
                 job_paused=0
-                echo "[$(timestamp)] RESUME ${label}: GPU is exclusive again " \
-                    "(ignoring processes using <=${IGNORED_GPU_PROCESS_MAX_MIB} MiB)."
+                echo "[$(timestamp)] RESUME ${label}: GPU has no foreign CUDA allocations."
             fi
         fi
 
@@ -280,7 +351,7 @@ run_job() {
 
     # Ensure a stopped child can be reaped if it exited during a race.
     if (( job_paused == 1 )); then
-        kill -CONT -- "-${job_pgid}" 2>/dev/null || true
+        signal_job_group CONT "${job_pid}" || true
     fi
 
     if wait "${job_pid}"; then
@@ -633,6 +704,12 @@ run_queue_pass() {
     run_all_jobs
     echo "[$(timestamp)] Queue pass $((QUEUE_ATTEMPT + 1)) finished with ${QUEUE_FAILURES} incomplete job(s)."
 }
+
+if (( DRY_RUN == 1 )); then
+    echo "Dry run: GPU ${GPU_INDEX}, ${GPU_IDLE_REQUIRED_CHECKS} consecutive idle checks (<=${GPU_IDLE_MAX_UTILIZATION}%, no foreign CUDA allocations); poll every ${GPU_POLL_SECONDS}s."
+    run_all_jobs
+    exit 0
+fi
 
 run_queue_pass 0
 
