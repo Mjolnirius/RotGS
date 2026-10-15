@@ -26,3 +26,7 @@ Session Saves
 logs/*
 
 analysis/*
+
+# Queue launcher logs written at the repository root.
+/preprocess_queue.log
+/train_queue_r082.log
