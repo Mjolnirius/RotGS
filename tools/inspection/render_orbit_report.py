@@ -72,6 +72,30 @@ def normalise(vector: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
+def capped_render_dimensions(width, height, render_size):
+    """Fit the source within a square pixel limit without enlarging it."""
+    if min(width, height, render_size) < 2:
+        raise ValueError("source dimensions and render size must be >= 2")
+    scale = min(1.0, render_size / max(width, height))
+    return (
+        max(2, min(width, round(width * scale))),
+        max(2, min(height, round(height * scale))),
+    )
+
+
+def capped_render_camera(camera, render_size):
+    width, height = capped_render_dimensions(
+        camera.image_width, camera.image_height, render_size
+    )
+    # Projection matrices use normalized image coordinates. Keeping the native
+    # matrix preserves the field of view and calibrated principal point while
+    # the rasterizer changes the number of output pixels.
+    return MiniCam(
+        width, height, camera.FoVy, camera.FoVx, camera.znear, camera.zfar,
+        camera.world_view_transform, camera.full_proj_transform,
+    )
+
+
 def virtual_camera(template, position, target, up_hint) -> MiniCam:
     forward = normalise(target - position)
     right = normalise(np.cross(forward, normalise(up_hint)))
@@ -343,6 +367,7 @@ def render_model(
     gif_fps,
     gif_width,
     overwrite,
+    render_size=None,
 ):
     cfg = load_cfg(model_path)
     if not getattr(cfg, "fixed_camera", False) or getattr(
@@ -351,7 +376,7 @@ def render_model(
         raise ValueError(
             f"only fixed, single-camera models are supported: {model_path}"
         )
-    cfg.resolution = resolution
+    cfg.resolution = 1 if render_size is not None else resolution
     selected_iteration = (
         latest_iteration(model_path) if iteration == -1 else iteration
     )
@@ -397,6 +422,25 @@ def render_model(
     if not views:
         raise ValueError(f"model has no training camera: {model_path}")
     template = views[0]
+    source_size = (int(template.image_width), int(template.image_height))
+    if render_size is not None:
+        template = capped_render_camera(template, render_size)
+    render_settings = {
+        "render_size": render_size,
+        "resolution_divisor": resolution if render_size is None else None,
+        "frames": frames,
+        "fps": fps,
+        "gif_fps": gif_fps,
+        "gif_width": gif_width,
+    }
+    previous = load_manifest(report_dir)["products"].get(model_path.name, {})
+    reuse_media = (
+        not overwrite
+        and previous.get("iteration") == selected_iteration
+        and previous.get("render_settings") == render_settings
+        and previous.get("width") == template.image_width
+        and previous.get("height") == template.image_height
+    )
     pipeline = SimpleNamespace(debug=getattr(cfg, "debug", False))
     background = torch.tensor(
         [1.0, 1.0, 1.0]
@@ -423,7 +467,7 @@ def render_model(
             "gif": output_dir / f"{name}.gif",
             "poster": output_dir / f"{name}_poster.jpg",
         }
-        if not overwrite and all(
+        if reuse_media and all(
             path.is_file() and path.stat().st_size
             for path in files.values()
         ):
@@ -467,9 +511,14 @@ def render_model(
         "camera_distance": camera_distance,
         "width": int(template.image_width),
         "height": int(template.image_height),
+        "video_width": int(template.image_width) // 2 * 2,
+        "video_height": int(template.image_height) // 2 * 2,
+        "render_settings": render_settings,
         "media": media,
         "rendered_at": datetime.now(timezone.utc).isoformat(),
     }
+    if render_size is not None:
+        product["source_width"], product["source_height"] = source_size
     del scene, gaussians
     torch.cuda.empty_cache()
     return product
@@ -915,6 +964,11 @@ def write_report(report_dir, manifest):
     angle_max = max(max(angles) for angles in angle_sets)
     angle_step = angle_sets[0][1] - angle_sets[0][0]
     report_settings = manifest.get("settings", {})
+    if report_settings.get("render_size") is not None:
+        size = report_settings["render_size"]
+        render_scale = f"Up to {size:,} × {size:,} px; smaller inputs keep native size"
+    else:
+        render_scale = f"1/{report_settings.get('resolution_divisor', 4)} source resolution"
 
     treatment = f"""
     <section class="overview">
@@ -955,7 +1009,7 @@ def write_report(report_dir, manifest):
             <dt>Trajectories</dt><dd>{len(TRAJECTORIES)} per product</dd>
             <dt>Video</dt><dd>{report_settings.get("frames", 240)} frames at {report_settings.get("fps", 30)} fps, H.264</dd>
             <dt>GIF</dt><dd>{report_settings.get("gif_fps", 15)} fps, {report_settings.get("gif_width", 480)} px wide</dd>
-            <dt>Render scale</dt><dd>1/{report_settings.get("resolution_divisor", 4)} source resolution</dd>
+            <dt>Render size</dt><dd>{render_scale}</dd>
           </dl>
           <p class="metric-note">Quality metrics use the 10 held-out test views. Higher is better for PSNR and SSIM; lower is better for LPIPS.</p>
         </article>
@@ -1110,7 +1164,7 @@ def write_report(report_dir, manifest):
                 <dt>Angle source</dt><dd>{'TAE measured angles' if getattr(cfg, 'leverage_TAE', False) else 'Nominal evenly spaced angles'}</dd>
                 <dt>Local residual</dt><dd>{'Disabled' if getattr(cfg, 'wo_tiny', False) else 'Enabled'}</dd>
                 <dt>Axis tilt range</dt><dd>{getattr(cfg, 'axis_tilt_min_deg', 0.0):g}°–{getattr(cfg, 'axis_tilt_max_deg', 90.0):g}°</dd>
-                <dt>Resolution</dt><dd>{product['width']} × {product['height']}</dd></dl>
+                <dt>Video resolution</dt><dd>{product.get('video_width', product['width'] // 2 * 2)} × {product.get('video_height', product['height'] // 2 * 2)}</dd></dl>
               </details>
               {distribution_html}
               <div class="video-grid">{''.join(videos)}</div>
@@ -1249,12 +1303,18 @@ def main():
         default=-1,
         help="checkpoint iteration; -1 selects latest",
     )
-    parser.add_argument(
+    resolution_options = parser.add_mutually_exclusive_group()
+    resolution_options.add_argument(
         "--resolution",
         type=int,
         default=4,
         choices=(1, 2, 4, 8),
         help="source-resolution divisor",
+    )
+    resolution_options.add_argument(
+        "--render-size",
+        type=int,
+        help="maximum output side length in pixels; preserve aspect ratio and never upscale",
     )
     parser.add_argument("--frames", type=int, default=240)
     parser.add_argument("--fps", type=int, default=30)
@@ -1264,6 +1324,8 @@ def main():
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
+    if args.render_size is not None and args.render_size < 2:
+        parser.error("render-size must be >= 2")
     if (
         args.frames < 2
         or args.fps <= 0
@@ -1292,7 +1354,9 @@ def main():
         "fps": args.fps,
         "gif_fps": args.gif_fps,
         "gif_width": args.gif_width,
-        "resolution_divisor": args.resolution,
+        "resolution_divisor": args.resolution if args.render_size is None else None,
+        "render_size": args.render_size,
+        "allow_upscale": False,
     }
     for model_path in models:
         product = render_model(
@@ -1305,6 +1369,7 @@ def main():
             gif_fps=args.gif_fps,
             gif_width=args.gif_width,
             overwrite=args.overwrite,
+            render_size=args.render_size,
         )
         manifest["products"][product["name"]] = product
         manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
