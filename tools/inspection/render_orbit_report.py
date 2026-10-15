@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import imageio.v2 as imageio
 import matplotlib
@@ -675,7 +676,7 @@ def format_duration(seconds):
 def format_timestamp(value):
     if value is None:
         return "n/a"
-    return value.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return value.astimezone(ZoneInfo("Europe/Zurich")).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def relative_media_path(product, filename):
@@ -890,6 +891,13 @@ def write_report(report_dir, manifest):
         manifest["products"].values(),
         key=lambda item: item["name"].lower(),
     )
+    if manifest.get("sort_order") == "run_number_desc":
+        products.sort(
+            key=lambda item: int(item["run_log_id"][1:])
+            if item.get("run_log_id", "").removeprefix("R").isdigit()
+            else -1,
+            reverse=True,
+        )
     product_details = {}
     configurations = []
     preprocessing_records = []
@@ -1018,6 +1026,10 @@ def write_report(report_dir, manifest):
 
     cards = []
     for product in products:
+        run_id = product.get("run_log_id", "")
+        product_title = f"{run_id} · {product['name']}" if run_id else product["name"]
+        search = f"{run_id} {product['name']}".strip().lower()
+        anchor = f' id="{html.escape(run_id, quote=True)}"' if run_id else ""
         videos = []
         for key, title, description in TRAJECTORIES:
             media = product.get("media", {}).get(key)
@@ -1053,6 +1065,15 @@ def write_report(report_dir, manifest):
         details = product_details[product["name"]]
         evaluation = details["evaluation"]
         cfg = details["configuration"]
+        logged = product.get("logged_evaluation", {})
+        use_logged = not evaluation and logged.get("iteration") == product["iteration"]
+        if use_logged:
+            evaluation = {
+                "psnr": logged["full_frame_psnr"],
+                "foreground_psnr": logged["foreground_psnr"],
+                "foreground_ssim": logged["foreground_crop_ssim"],
+                "test_views": logged["test_views"],
+            }
 
         distribution_cards = []
         for key in ("x_view", "y_view", "z_view", "radius_height"):
@@ -1100,8 +1121,23 @@ def write_report(report_dir, manifest):
                 + "</strong></div>"
             )
 
-        metrics_html = "".join(
-            (
+        if use_logged:
+            metric_cards = (
+                metric_card("Full-frame PSNR ↑ (float)", "psnr", 3, " dB"),
+                metric_card("Foreground PSNR ↑ (float)", "foreground_psnr", 3, " dB"),
+                metric_card("FG-crop SSIM ↑ (float)", "foreground_ssim", 4),
+                '<div class="metric"><span>External LPIPS ↓</span><strong>pending</strong></div>',
+                '<div class="metric"><span>Densification until</span><strong>'
+                + f'{cfg.densify_until_iter:,}' + '</strong></div>',
+            )
+            metric_context = (
+                f"Logged in-memory float validation across {evaluation['test_views']} held-out "
+                f"views at iteration {product['iteration']:,}; full-frame and soft-alpha "
+                "foreground PSNR are labelled separately. External saved-PNG/crop evaluation "
+                "is pending. Validation scores are independent of the orbit-video resolution."
+            )
+        else:
+            metric_cards = (
                 metric_card("Mean PSNR ↑", "psnr", 2, " dB"),
                 metric_card("Mean SSIM ↑", "ssim", 4),
                 metric_card("Mean LPIPS ↓", "lpips", 4),
@@ -1111,6 +1147,14 @@ def write_report(report_dir, manifest):
                 metric_card(
                     "Worst-view LPIPS ↓", "worst_lpips", 4
                 ),
+            )
+            metric_context = (
+                f"Held-out evaluation across {evaluation['test_views']} views at iteration "
+                f"{product['iteration']}."
+                if evaluation else "External held-out evaluation is pending for this checkpoint."
+            )
+        metrics_html = "".join(
+            (*metric_cards,
                 (
                     '<div class="metric gaussian-count"><span>Saved '
                     'Gaussians</span><strong>'
@@ -1147,9 +1191,9 @@ def write_report(report_dir, manifest):
           </div>"""
         cards.append(
             f"""
-            <section class="product" data-search="{html.escape(product['name'].lower(), quote=True)}">
+            <section class="product"{anchor} data-search="{html.escape(search, quote=True)}">
               <header>
-                <div><h2>{html.escape(product['name'])}</h2><p class="path">{html.escape(product['model_path'])}</p></div>
+                <div><h2>{html.escape(product_title)}</h2><p class="path">{html.escape(product['model_path'])}</p></div>
                 <div class="product-actions">
                   <span class="checkpoint">iteration {product['iteration']}</span>
                   <button class="play-toggle product-play-toggle" type="button" aria-pressed="false">Play product videos</button>
@@ -1157,13 +1201,14 @@ def write_report(report_dir, manifest):
               </header>
               {run_html}
               <div class="metric-grid">{metrics_html}</div>
-              <p class="metric-context">Held-out evaluation across {evaluation.get('test_views', 0)} views at iteration {product['iteration']}.</p>
+              <p class="metric-context">{metric_context}</p>
               <details><summary>Render metadata</summary>
                 <dl><dt>Learned axis</dt><dd>[{axis}]</dd><dt>Rotation center</dt><dd>[{center}]</dd>
                 <dt>Training elevation</dt><dd>{product['source_elevation_deg']:.2f}°</dd>
                 <dt>Angle source</dt><dd>{'TAE measured angles' if getattr(cfg, 'leverage_TAE', False) else 'Nominal evenly spaced angles'}</dd>
                 <dt>Local residual</dt><dd>{'Disabled' if getattr(cfg, 'wo_tiny', False) else 'Enabled'}</dd>
                 <dt>Axis tilt range</dt><dd>{getattr(cfg, 'axis_tilt_min_deg', 0.0):g}°–{getattr(cfg, 'axis_tilt_max_deg', 90.0):g}°</dd>
+                <dt>Densification until</dt><dd>{cfg.densify_until_iter:,}</dd>
                 <dt>Video resolution</dt><dd>{product.get('video_width', product['width'] // 2 * 2)} × {product.get('video_height', product['height'] // 2 * 2)}</dd></dl>
               </details>
               {distribution_html}
@@ -1371,6 +1416,10 @@ def main():
             overwrite=args.overwrite,
             render_size=args.render_size,
         )
+        previous = manifest["products"].get(product["name"], {})
+        for field in ("run_log_id", "evaluation_status", "logged_evaluation", "distribution"):
+            if field in previous:
+                product[field] = previous[field]
         manifest["products"][product["name"]] = product
         manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
         (report_dir / "report_manifest.json").write_text(

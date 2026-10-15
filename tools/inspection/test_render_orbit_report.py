@@ -1,4 +1,6 @@
+from argparse import Namespace
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import io
 import json
 import math
@@ -149,6 +151,95 @@ class RenderMediaCacheTests(unittest.TestCase):
     def test_overwrite_renders_every_trajectory(self):
         render, _ = self.render(overwrite=True)
         self.assertEqual(render.call_count, len(report.TRAJECTORIES))
+
+
+class ReportPresentationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.dataset = self.root / "dataset"
+        self.dataset.mkdir()
+        (self.dataset / "preprocessing_metadata.json").write_text(json.dumps({
+            "image_count": 73, "output_size": [1435, 1435],
+            "segmentation": {"backend": "sam3.1"},
+            "undistortion": {"calibration_file": "/calibration/camera_calibration.npz"},
+            "angles_degrees": list(range(0, 361, 5)),
+        }))
+        self.manifest = dict(session_name="Session_04", products={},
+                             sort_order="run_number_desc", settings={"render_size": 1080})
+        self.output = self.root / "report"
+        self.output.mkdir()
+
+    def add_product(self, name, run_id, *, logged_iteration=30000):
+        model = self.root / name
+        model.mkdir()
+        config = Namespace(
+            source_path=str(self.dataset), iterations=30000, sh_degree=3,
+            axis_mode="bounded_tilt", leverage_TAE=True, wo_tiny=True, wo_flow=True,
+            densify_from_iter=500, densify_until_iter=13000,
+            densification_interval=100, opacity_reset_interval=3000,
+        )
+        (model / "cfg_args").write_text(repr(config))
+        product = dict(
+            name=name, model_path=str(model), iteration=30000, run_log_id=run_id,
+            axis=[0., 0.866, 0.5], center=[0., 0., 0.], source_elevation_deg=30.,
+            width=1080, height=1080, media={},
+            logged_evaluation=dict(iteration=logged_iteration, full_frame_psnr=25.123,
+                                   foreground_psnr=23.456, foreground_crop_ssim=0.8123,
+                                   test_views=10),
+        )
+        self.manifest["products"][name] = product
+        return model
+
+    def write_report(self):
+        report.write_report(self.output, self.manifest)
+        return (self.output / "index.html").read_text()
+
+    def test_matching_logged_metrics_are_labelled_without_claiming_external_lpips(self):
+        self.add_product("model", "R082")
+        page = self.write_report()
+        self.assertIn("Full-frame PSNR ↑ (float)", page)
+        self.assertIn("25.123 dB", page)
+        self.assertIn("23.456 dB", page)
+        self.assertIn("0.8123", page)
+        self.assertIn("<span>External LPIPS ↓</span><strong>pending</strong>", page)
+        self.assertIn("Logged in-memory float validation across 10 held-out views", page)
+
+    def test_logged_metrics_for_another_checkpoint_are_not_displayed(self):
+        self.add_product("model", "R082", logged_iteration=5000)
+        page = self.write_report()
+        self.assertNotIn("25.123 dB", page)
+        self.assertNotIn("Full-frame PSNR ↑ (float)", page)
+        self.assertIn("External held-out evaluation is pending for this checkpoint.", page)
+
+    def test_external_evaluation_takes_precedence_over_logged_metrics(self):
+        model = self.add_product("model", "R082")
+        (model / "results.json").write_text(json.dumps({
+            "ours_30000": {"PSNR": 30.25, "SSIM": 0.9, "LPIPS": 0.12},
+        }))
+        (model / "per_view.json").write_text(json.dumps({
+            "ours_30000": {"PSNR": {"view.png": 30.25}, "LPIPS": {"view.png": 0.12}},
+        }))
+        page = self.write_report()
+        self.assertIn("<span>Mean PSNR ↑</span><strong>30.25 dB</strong>", page)
+        self.assertIn("Mean LPIPS ↓", page)
+        self.assertNotIn("25.123 dB", page)
+        self.assertNotIn("Full-frame PSNR ↑ (float)", page)
+
+    def test_run_ids_sort_numerically_and_supply_search_and_deep_links(self):
+        self.add_product("a_older", "R9")
+        self.add_product("z_newer", "R82")
+        page = self.write_report()
+        self.assertLess(page.index('id="R82"'), page.index('id="R9"'))
+        self.assertIn('data-search="r82 z_newer"', page)
+        self.assertIn("R82 · z_newer", page)
+
+    def test_timestamps_use_zurich_offsets_in_summer_and_winter(self):
+        for month, expected in [(7, "14:00:00 CEST"), (1, "13:00:00 CET")]:
+            with self.subTest(month=month):
+                value = datetime(2026, month, 15, 12, tzinfo=timezone.utc)
+                self.assertTrue(report.format_timestamp(value).endswith(expected))
 
 
 if __name__ == "__main__":
