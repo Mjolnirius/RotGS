@@ -3,7 +3,7 @@
 This tool evaluates saved RotGS test renders without modifying training code,
 checkpoints, `results.json`, or the W&B export.
 
-Its retained Session 03 inputs and outputs are in the [E04 analysis bundle](/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis/README.md). See the [project evaluation policy](../../docs/methods/evaluation.md) for comparisons across reports.
+Its retained Session 03 inputs and outputs are in the [E04 analysis bundle](/shared/datasets/3D_Scanning_MT/research/reports/experiments/E04_product_baseline/wandb_analysis/README.md). See the [shared evaluation policy](/shared/datasets/3D_Scanning_MT/research/methods/evaluation.md) for comparisons across reports.
 
 The source RGBA alpha is used as a soft mask for foreground PSNR.  Cropped SSIM
 and LPIPS use the bounding box of `alpha > 0.001`, expanded by eight pixels and

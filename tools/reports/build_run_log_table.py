@@ -6,8 +6,12 @@ Run again after editing the Markdown table. Only the sibling HTML is written.
 from pathlib import Path
 import html
 import re
+import sys
 
-ROOT = Path('/shared/datasets/3D_Scanning_MT/output_RotGS')
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.reports.research_paths import RESEARCH_ROOT
+
+ROOT = RESEARCH_ROOT
 SOURCE = ROOT / 'RUN_LOG.md'
 OUTPUT = ROOT / 'RUN_LOG.top_30d.html'
 HEADING = '### Quoellfrisch top 30° runs'

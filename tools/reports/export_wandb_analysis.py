@@ -37,7 +37,10 @@ import wandb
 
 SCRIPT_VERSION = "1.0.0"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT = Path("/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis")
+sys.path.insert(0, str(REPO_ROOT))
+from tools.reports.research_paths import REPORTS_ROOT
+
+DEFAULT_OUTPUT = REPORTS_ROOT / "experiments/E04_product_baseline/wandb_analysis"
 
 NORMALIZED_CONFIG_FIELDS = [
     "iterations", "sh_degree", "white_background", "rotation_direction",

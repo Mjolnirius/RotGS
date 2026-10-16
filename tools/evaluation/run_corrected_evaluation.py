@@ -24,7 +24,10 @@ from corrected_metrics import CroppedLPIPS, cropped_ssim, foreground_crop, foreg
 
 
 ROOT = Path(__file__).resolve().parents[2]
-REPORT = Path("/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis")
+sys.path.insert(0, str(ROOT))
+from tools.reports.research_paths import REPORTS_ROOT
+
+REPORT = REPORTS_ROOT / "experiments/E04_product_baseline/wandb_analysis"
 SELECTION = REPORT / "run_selection.csv"
 THRESHOLD = 0.001
 PADDING = 8

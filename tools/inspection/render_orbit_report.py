@@ -33,6 +33,7 @@ from scene import Scene
 from scene.cameras import MiniCam
 from utils.general_utils import safe_state
 from utils.graphics_utils import getProjectionMatrix, getWorld2View2
+from tools.reports.research_paths import REPORTS_ROOT, ROTGS_OUTPUT
 
 
 TRAJECTORIES = (
@@ -1326,7 +1327,8 @@ def infer_report_dir(models):
             "pass --report-dir explicitly"
         )
     session = next(iter(parents))
-    return session.parent / "reports" / "inspection" / session.name / "orbits"
+    reports = REPORTS_ROOT if session.parent == ROTGS_OUTPUT else session.parent / "reports"
+    return reports / "inspection" / session.name / "orbits"
 
 
 def main():
@@ -1341,7 +1343,7 @@ def main():
     parser.add_argument(
         "--report-dir",
         type=Path,
-        help="existing/new report folder; defaults to OUTPUT/reports/inspection/SESSION/orbits",
+        help="existing/new report folder; defaults to research/reports/inspection/SESSION/orbits",
     )
     parser.add_argument(
         "--iteration",

@@ -11,6 +11,7 @@ import csv
 import hashlib
 import json
 import platform
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -22,7 +23,10 @@ import pandas as pd
 import scipy
 
 
-ROOT = Path("/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.reports.research_paths import REPORTS_ROOT
+
+ROOT = REPORTS_ROOT / "experiments/E04_product_baseline/wandb_analysis"
 REPORT = ROOT / "report"
 FIGURES = REPORT / "figures"
 TABLES = REPORT / "tables"

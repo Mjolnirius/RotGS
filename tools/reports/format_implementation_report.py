@@ -5,9 +5,13 @@ import html
 import json
 import os
 import re
+import sys
 from urllib.parse import urlsplit, unquote
 
-ROOT = Path('/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E06_motion/implementation_decisions')
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.reports.research_paths import REPORTS_ROOT, RESEARCH_ROOT
+
+ROOT = REPORTS_ROOT / 'experiments/E06_motion/implementation_decisions'
 SOURCE = (ROOT / 'report.md').resolve()
 markdown = (ROOT/'report.md').read_text()
 runs = json.loads((ROOT/'evidence/runs.json').read_text())
@@ -29,7 +33,7 @@ def document_url(value):
     path = Path(unquote(url.path))
     if not path.is_absolute():
         path = SOURCE.parent / path
-    if path.is_relative_to(Path('/shared/datasets/3D_Scanning_MT/output_RotGS')):
+    if path.is_relative_to(RESEARCH_ROOT):
         target = os.path.relpath(path, ROOT)
     else:
         target = str(path)

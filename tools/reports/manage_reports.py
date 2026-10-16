@@ -15,7 +15,11 @@ from urllib.parse import unquote, urlsplit
 
 
 REPO = Path(__file__).resolve().parents[2]
-DOCS = REPO / "docs"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from tools.reports.research_paths import DATA_ROOT, RESEARCH_ROOT
+
+DOCS = RESEARCH_ROOT
 
 
 def expand_runs(specifications):
@@ -36,8 +40,8 @@ def build(studies, catalog):
         "# Experiment objectives", "",
         "<!-- Generated from studies.json by tools/reports/manage_reports.py. -->",
         "[Documentation home](../README.md) · "
-        f"[Run ledger]({catalog['output_root']}/RUN_LOG.md) · "
-        f"[Visual catalogue]({catalog['output_root']}/reports/index.html)", "",
+        f"[Run ledger]({DOCS}/RUN_LOG.md) · "
+        f"[Visual catalogue]({DOCS}/reports/index.html)", "",
         f"Reviewed {studies['reviewed']} (Europe/Zurich). Objective labels were reconstructed "
         "from the surviving history and are editable in `studies.json` and the study documents.", "",
         "A study describes a question. A session describes acquisition context. Each documented "
@@ -84,7 +88,7 @@ def build(studies, catalog):
             link(r["title"], r["path"]), html.escape(r["purpose"]),
             html.escape(", ".join(r.get("studies", [])) or "Shared"), html.escape(r["scope"]),
         ]) + "</tr>")
-    data = Path(catalog["output_root"]).parent / "cleaned"
+    data = DATA_ROOT / "cleaned"
     reviews = sorted(data.glob("**/*_review/index.html"))
     review_rows = []
     for p in reviews:
@@ -98,12 +102,12 @@ def build(studies, catalog):
         ]) + "</tr>")
     document = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RotGS reports and experiment objectives</title>
+<title>3D scanning research and experiment objectives</title>
 <style>body{{font:16px/1.5 system-ui,sans-serif;max-width:1400px;margin:2rem auto;padding:0 1rem;color:#182331;background:#fafbfd}}
 a{{color:#125b96}}table{{border-collapse:collapse;width:100%;margin:1rem 0 2rem}}th,td{{text-align:left;vertical-align:top;padding:.65rem;border-bottom:1px solid #d9e0e8}}th{{background:#eaf0f7}}.table{{overflow:auto}}nav a{{margin-right:1rem}}code{{background:#eaf0f7;padding:.1rem .3rem}}</style></head>
-<body><h1>RotGS reports and experiment objectives</h1>
+<body><h1>3D scanning research and experiment objectives</h1>
 <p>Navigation reviewed {html.escape(studies['reviewed'])}, Europe/Zurich. Scientific reports retain their own dates and scope.</p>
-<nav>{link('Documentation home', DOCS/'README.md')}{link('Objective overview', DOCS/'experiments/README.md')}{link('Run ledger', Path(catalog['output_root'])/'RUN_LOG.md')}{link('Sortable top-can timeline', Path(catalog['output_root'])/'RUN_LOG.top_30d.html')}</nav>
+<nav>{link('Research home', DOCS/'README.md')}{link('Objective overview', DOCS/'experiments/README.md')}{link('Run ledger', DOCS/'RUN_LOG.md')}{link('Sortable top-can timeline', DOCS/'RUN_LOG.top_30d.html')}</nav>
 <h2>Experiment objectives</h2><div class="table"><table><thead><tr><th>Study</th><th>Question</th><th>Primary run entries</th><th>State at review</th></tr></thead><tbody>{''.join(study_rows)}</tbody></table></div>
 <h2>Reports and evidence</h2><p>Each report lists its actual coverage. A historical comparison and a proposed follow-up have different evidence status.</p>
 <div class="table"><table><thead><tr><th>Report</th><th>Purpose</th><th>Studies</th><th>Coverage / date</th></tr></thead><tbody>{''.join(report_rows)}</tbody></table></div>
@@ -111,7 +115,7 @@ a{{color:#125b96}}table{{border-collapse:collapse;width:100%;margin:1rem 0 2rem}
 <div class="table"><table><thead><tr><th>Prepared dataset</th><th>Review</th><th>Location</th></tr></thead><tbody>{''.join(review_rows)}</tbody></table></div>
 <p>Maintain navigation with <code>python3 tools/reports/manage_reports.py --build --check</code>. See {link('reporting workflow', DOCS/'reporting.md')}.</p></body></html>
 '''
-    output = Path(catalog["output_root"]) / "reports/index.html"
+    output = DOCS / "reports/index.html"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(document)
     print(f"Built objective overview and {output} ({len(review_rows)} dataset reviews).")
@@ -156,10 +160,10 @@ def check(studies, catalog):
     output = Path(catalog["output_root"])
     files = {p for p in DOCS.rglob("*.md") if not p.is_symlink()
              and not p.is_relative_to(DOCS/"archive")}
-    files.add(output/"RUN_LOG.md")
-    files.update(p for p in (output/"reports").rglob("*.html")
+    files.add(DOCS/"RUN_LOG.md")
+    files.update(p for p in (DOCS/"reports").rglob("*.html")
                  if not any(part in p.parts for part in ("evidence", "full_export", "chat_analysis_bundle")))
-    files.update(p for p in (output.parent/"cleaned").glob("**/*_review/index.html")
+    files.update(p for p in (DATA_ROOT/"cleaned").glob("**/*_review/index.html")
                  if p.parent.name in {"mask_review", "crop_review"})
     references = 0
     for p in sorted(files):
@@ -172,7 +176,7 @@ def check(studies, catalog):
     for r in catalog["reports"]:
         if not Path(r["path"]).exists():
             errors.append(f"Missing catalogue report: {r['path']}")
-    ledger = (output/"RUN_LOG.md").read_text()
+    ledger = (DOCS/"RUN_LOG.md").read_text()
     section = ledger.split('<div class="rotgs-run-timeline">', 1)[1].split('</div>', 1)[0]
     documented = set(re.findall(r"^\| [~*]*(R\d{3})[~*]* \|", section, flags=re.M))
     assignments = Counter()
@@ -203,7 +207,9 @@ def check(studies, catalog):
         return 1
     print(f"Checked {len(files)} documents/HTML pages and {references} local references; "
           f"all {len(documented)} documented run IDs have one primary objective.")
-    unregistered = [p.parent.name for p in output.glob("session_*/**/cfg_args") if p.parent.name not in ledger]
+    roots = catalog.get("output_roots", {"RotGS": str(output)})
+    unregistered = [p.parent.name for root in roots.values()
+                    for p in Path(root).glob("**/cfg_args") if p.parent.name not in ledger]
     if unregistered:
         print("Output folders absent from the ledger snapshot (register actual attempts from evidence):")
         for name in sorted(unregistered):
@@ -212,10 +218,14 @@ def check(studies, catalog):
 
 
 def main():
+    global DOCS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", action="store_true", help="rebuild objective overview and HTML catalogue")
     parser.add_argument("--check", action="store_true", help="read-only local-reference and objective-coverage checks")
+    parser.add_argument("--research-root", type=Path, default=RESEARCH_ROOT,
+                        help="shared research source directory (or SCANNING_RESEARCH_ROOT)")
     args = parser.parse_args()
+    DOCS = args.research_root.expanduser().resolve()
     studies = json.loads((DOCS/"experiments/studies.json").read_text())
     catalog = json.loads((DOCS/"report_catalog.json").read_text())
     if args.build:

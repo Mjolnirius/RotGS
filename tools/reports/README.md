@@ -8,6 +8,6 @@ python3 tools/reports/build_run_log_table.py
 python3 tools/reports/format_implementation_report.py
 ```
 
-`manage_reports.py` builds navigation from `docs/experiments/studies.json` and `docs/report_catalog.json` and checks local references and documented run coverage. Use `--check` alone for read-only validation. See [the reporting workflow](../../docs/reporting.md).
+`manage_reports.py` builds navigation from the shared research `experiments/studies.json` and `report_catalog.json` and checks local references and documented run coverage across method output roots. Use `--check` alone for read-only validation. Set `SCANNING_RESEARCH_ROOT` or pass `--research-root` to select another source directory. See [the reporting workflow](/shared/datasets/3D_Scanning_MT/research/reporting.md) and [tool commands](../../docs/reporting.md).
 
-The formatter rebuilds the implementation HTML from its canonical Markdown source. The W&B export and final scientific figure generator remain separate commands. Navigation maintenance never invokes them or changes scientific evidence. The default shared output root is `/shared/datasets/3D_Scanning_MT/output_RotGS`.
+The formatter rebuilds the implementation HTML from its canonical Markdown source. The W&B export and final scientific figure generator remain separate commands. Navigation maintenance never invokes them or changes scientific evidence. Research sources and generated reports default to `/shared/datasets/3D_Scanning_MT/research`; trained RotGS outputs remain under `output_RotGS`.

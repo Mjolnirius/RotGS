@@ -15,9 +15,7 @@ wandb
 *.db
 *.ini
 
-# Keep the versioned milestone illustrations portable.
-!docs/milestones/assets/
-!docs/milestones/assets/**/*.png
+# Milestone illustrations are versioned in the shared research repository.
 
 #Ignore following folder
 Session Saves
@@ -27,7 +25,7 @@ logs/*
 
 analysis/*
 
-# Compatibility links at retired locations; canonical text lives under docs/.
+# Compatibility links at retired locations; research text has its own repository.
 /milestones
 
 # Keep raw conversation history and its index local.
