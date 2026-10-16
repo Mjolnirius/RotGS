@@ -20,6 +20,25 @@ from tools.inspection.render_orbit_report import (
 from utils.graphics_utils import getProjectionMatrix
 
 
+class ReportDestinationTests(unittest.TestCase):
+    def test_models_in_one_session_use_the_shared_inspection_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            models = [root / "session_04" / name for name in ("baseline", "variant")]
+            self.assertEqual(
+                report.infer_report_dir(models),
+                root / "reports" / "inspection" / "session_04" / "orbits",
+            )
+
+    def test_models_from_different_sessions_require_an_explicit_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "pass --report-dir explicitly"):
+                report.infer_report_dir([
+                    root / "session_03" / "baseline", root / "session_04" / "variant",
+                ])
+
+
 class CappedRenderResolutionTests(unittest.TestCase):
     def test_all_report_sources_fit_exactly_1080(self):
         for size in (1435, 1650, 1651, 1777):

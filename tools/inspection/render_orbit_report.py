@@ -1325,7 +1325,8 @@ def infer_report_dir(models):
             "models do not share one session directory; "
             "pass --report-dir explicitly"
         )
-    return next(iter(parents)) / "render_report"
+    session = next(iter(parents))
+    return session.parent / "reports" / "inspection" / session.name / "orbits"
 
 
 def main():
@@ -1340,7 +1341,7 @@ def main():
     parser.add_argument(
         "--report-dir",
         type=Path,
-        help="existing/new report folder; defaults to SESSION/render_report",
+        help="existing/new report folder; defaults to OUTPUT/reports/inspection/SESSION/orbits",
     )
     parser.add_argument(
         "--iteration",
