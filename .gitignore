@@ -15,9 +15,9 @@ wandb
 *.db
 *.ini
 
-# Keep milestone report media portable.
-!milestones/assets/
-!milestones/assets/**/*.png
+# Keep the versioned milestone illustrations portable.
+!docs/milestones/assets/
+!docs/milestones/assets/**/*.png
 
 #Ignore following folder
 Session Saves
@@ -26,6 +26,13 @@ Session Saves
 logs/*
 
 analysis/*
+
+# Compatibility links at retired locations; canonical text lives under docs/.
+/milestones
+
+# Keep raw conversation history and its index local.
+/docs/archive/conversations/
+/docs/archive/README.md
 
 # Queue launcher logs written at the repository root.
 /preprocess_queue.log

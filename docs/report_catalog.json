@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "output_root": "/shared/datasets/3D_Scanning_MT/output_RotGS",
+  "reports": [
+    {
+      "title": "Run ledger",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/RUN_LOG.md",
+      "purpose": "Individual run/attempt history, settings, scores, and comments",
+      "studies": [],
+      "scope": "R001–R085 snapshot, 2026-10-15"
+    },
+    {
+      "title": "Sortable top-can timeline",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/RUN_LOG.top_30d.html",
+      "purpose": "Filtered sortable view of the ledger",
+      "studies": [],
+      "scope": "Generated from the retained top-can table"
+    },
+    {
+      "title": "Nice Can milestone",
+      "path": "/workspaces/RotGS/docs/milestones/milestone_01_nice_can.md",
+      "purpose": "First working reconstruction and historical failures",
+      "studies": [
+        "E01"
+      ],
+      "scope": "August milestone; original PDF retained"
+    },
+    {
+      "title": "Recorded end-to-end pipeline",
+      "path": "/workspaces/RotGS/docs/pipeline/recorded_2026-10-13.md",
+      "purpose": "Detailed acquisition-to-evaluation methodology",
+      "studies": [],
+      "scope": "2026-10-13 snapshot; example R080"
+    },
+    {
+      "title": "Session 03 scientific analysis",
+      "path": "/workspaces/RotGS/docs/experiments/E04_product_baseline/report.md",
+      "purpose": "Foreground-aware evaluation, training dynamics, and cost",
+      "studies": [
+        "E04"
+      ],
+      "scope": "Twelve completed Session 03 captures"
+    },
+    {
+      "title": "Session 03 analysis bundle",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis/README.md",
+      "purpose": "Data, verification, figures, and original exports",
+      "studies": [
+        "E04"
+      ],
+      "scope": "Frozen cohort and retained provenance"
+    },
+    {
+      "title": "Session 03 LaTeX/Overleaf output",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis/report/README.md",
+      "purpose": "Thesis/report fragment and build instructions",
+      "studies": [
+        "E04"
+      ],
+      "scope": "Generated from finalized analysis data"
+    },
+    {
+      "title": "Implementation decisions",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E06_motion/implementation_decisions/index.html",
+      "purpose": "Illustrated preparation, motion, and implementation assessment",
+      "studies": [
+        "E05",
+        "E06",
+        "E07"
+      ],
+      "scope": "October 13–14 assessment with completed axis extension"
+    },
+    {
+      "title": "Shared top-can comparison",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E07_axis/comparison/index.html",
+      "purpose": "Matched visual evidence, common target, metrics, and geometry limits",
+      "studies": [
+        "E02",
+        "E05",
+        "E06",
+        "E07"
+      ],
+      "scope": "October 7 base, extended through October 14"
+    },
+    {
+      "title": "Spur investigation",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E07_axis/comparison/diagnostics/tae_spurs_20261014/index.html",
+      "purpose": "Axis lock, SH findings, and R081 follow-up",
+      "studies": [
+        "E07"
+      ],
+      "scope": "2026-10-14; R081-only decision superseded"
+    },
+    {
+      "title": "Completed axis comparison",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E07_axis/comparison/diagnostics/axis_ablation_20261014/index.html",
+      "purpose": "Boundary repair, bound width, fixed calibration, and edges",
+      "studies": [
+        "E07"
+      ],
+      "scope": "R078/R081/R082/R084; failed R083 retained"
+    },
+    {
+      "title": "R081 saturation audit",
+      "path": "/workspaces/RotGS/docs/experiments/E08_capacity/R081_audit.md",
+      "purpose": "Scheduled freezing, gradients, opacity/color, and shape",
+      "studies": [
+        "E08"
+      ],
+      "scope": "CPU audit 2026-10-15; six checkpoints"
+    },
+    {
+      "title": "Recovered checkpoint PSNR",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/evaluations/2026-10-07_saved_checkpoints/README.md",
+      "purpose": "Evaluation of saved endpoints lacking historical scores",
+      "studies": [
+        "E03",
+        "E06"
+      ],
+      "scope": "2026-10-07; 19 saved endpoints"
+    },
+    {
+      "title": "Native full-frame/foreground PSNR audit",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/evaluations/2026-10-14_native_psnr/README.md",
+      "purpose": "CPU evaluation and source checks of saved PNG pairs",
+      "studies": [],
+      "scope": "2026-10-14; 32 run folders / 500 held-out views"
+    },
+    {
+      "title": "Session 03 orbit gallery",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_03/orbits/index.html",
+      "purpose": "Multi-elevation product render inspection",
+      "studies": [
+        "E04"
+      ],
+      "scope": "Thirteen gallery entries; manifest defines checkpoints"
+    },
+    {
+      "title": "Session 04 orbit gallery",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_04/orbits/index.html",
+      "purpose": "Earlier top-can branches and reference inspection",
+      "studies": [
+        "E05",
+        "E06"
+      ],
+      "scope": "Five gallery entries; selective coverage"
+    },
+    {
+      "title": "Session 04 Gaussian diagnostics",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_04/gaussian_centers/index.html",
+      "purpose": "Orbit media and Gaussian distribution charts",
+      "studies": [
+        "E05",
+        "E06",
+        "E07"
+      ],
+      "scope": "Seven gallery entries; selective coverage"
+    },
+    {
+      "title": "Session 04 view poses",
+      "path": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_04/view_poses/index.html",
+      "purpose": "Pose/angle history and rendered acquisition views",
+      "studies": [
+        "E06"
+      ],
+      "scope": "Five earlier top-can branches"
+    }
+  ],
+  "relocations": [
+    {
+      "old": "/workspaces/RotGS/milestones",
+      "new": "/workspaces/RotGS/docs/milestones"
+    },
+    {
+      "old": "/workspaces/RotGS/Session Saves",
+      "new": "/workspaces/RotGS/docs/archive/conversations"
+    },
+    {
+      "old": "/workspaces/RotGS/analysis/wandb_report",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E04_product_baseline/wandb_analysis"
+    },
+    {
+      "old": "/workspaces/RotGS/analysis/R081_saturation_20261015",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E08_capacity/R081_saturation_20261015"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/comparison_top_20261007",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E07_axis/comparison"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_04/implementation_decisions",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/experiments/E06_motion/implementation_decisions"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/evaluation_psnr_20261007",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/evaluations/2026-10-07_saved_checkpoints"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/evaluation_psnr_20261014",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/evaluations/2026-10-14_native_psnr"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_03/render_report",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_03/orbits"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_04/render_report",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_04/orbits"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_04/render_report_gaussian_centers",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_04/gaussian_centers"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_04/view_pose_report",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/inspection/session_04/view_poses"
+    },
+    {
+      "old": "/workspaces/RotGS/tools/preprocessing/debugging_tracking.md",
+      "new": "/workspaces/RotGS/docs/archive/notes/debugging_tracking.md"
+    },
+    {
+      "old": "/workspaces/RotGS/Session Saves/D_current_pipeline_latest_run.md",
+      "new": "/workspaces/RotGS/docs/pipeline/recorded_2026-10-13.md"
+    },
+    {
+      "old": "/workspaces/RotGS/Session Saves/assets",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/pipeline/2026-10-13/assets"
+    },
+    {
+      "old": "/workspaces/RotGS/Session Saves/D_current_pipeline_latest_run.zip",
+      "new": "/shared/datasets/3D_Scanning_MT/output_RotGS/reports/pipeline/2026-10-13/D_current_pipeline_latest_run.zip"
+    },
+    {
+      "old": "/workspaces/RotGS/analysis/wandb_report/rotgs_wandb_analysis_final.md",
+      "new": "/workspaces/RotGS/docs/experiments/E04_product_baseline/report.md"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_04/implementation_decisions/report.md",
+      "new": "/workspaces/RotGS/docs/experiments/E06_motion/report.md"
+    },
+    {
+      "old": "/workspaces/RotGS/analysis/R081_saturation_20261015/README.md",
+      "new": "/workspaces/RotGS/docs/experiments/E08_capacity/R081_audit.md"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/build_run_log_table.py",
+      "new": "/workspaces/RotGS/tools/reports/build_run_log_table.py"
+    },
+    {
+      "old": "/workspaces/RotGS/analysis/wandb_report/export_wandb_analysis.py",
+      "new": "/workspaces/RotGS/tools/reports/export_wandb_analysis.py"
+    },
+    {
+      "old": "/workspaces/RotGS/analysis/wandb_report/generate_final_report_assets.py",
+      "new": "/workspaces/RotGS/tools/reports/generate_training_report.py"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/orbitvu/Milestone_01_CODEX.md",
+      "new": "/workspaces/RotGS/docs/archive/conversations/Milestone_01_CODEX.md"
+    },
+    {
+      "old": "/shared/datasets/3D_Scanning_MT/output_RotGS/session_04/implementation_decisions/format_report.py",
+      "new": "/workspaces/RotGS/tools/reports/format_implementation_report.py"
+    }
+  ]
+}

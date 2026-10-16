@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "reviewed": "2026-10-15",
+  "studies": [
+    {
+      "id": "E01",
+      "slug": "first_reconstruction",
+      "title": "First working reconstruction",
+      "question": "What prevents a recognizable, stable first can reconstruction?",
+      "primary_runs": [
+        "R001-R022"
+      ],
+      "reference_runs": [],
+      "status": "Milestone achieved; historical",
+      "finding": "Input geometry, constrained motion, loss changes, and rotation-direction debugging led to the Nice Can milestone.",
+      "document": "E01_first_reconstruction.md"
+    },
+    {
+      "id": "E02",
+      "slug": "input_preparation",
+      "title": "Input preparation and detail",
+      "question": "How do crop, undistortion, resolution, continuation, and densification affect detail?",
+      "primary_runs": [
+        "R023-R027"
+      ],
+      "reference_runs": [
+        "R058"
+      ],
+      "status": "Historical comparisons retained",
+      "finding": "Separate continuation from fresh growth experiments; differing preparations limit direct attribution.",
+      "document": "E02_input_preparation.md"
+    },
+    {
+      "id": "E03",
+      "slug": "multi_camera",
+      "title": "Multiple camera elevations",
+      "question": "Can 5°, 30°, and 60° captures produce a coherent shared reconstruction?",
+      "primary_runs": [
+        "R028-R048"
+      ],
+      "reference_runs": [],
+      "status": "Exploratory branch; unresolved",
+      "finding": "Native and prefused geometry, pose, depth, silhouette, and capacity probes survive; smoke checks are distinct from quality evidence.",
+      "document": "E03_multi_camera.md"
+    },
+    {
+      "id": "E04",
+      "slug": "product_baseline",
+      "title": "Coverage across products",
+      "question": "How does a common single-camera setup behave across product captures?",
+      "primary_runs": [
+        "R049-R065"
+      ],
+      "reference_runs": [
+        "R025"
+      ],
+      "status": "Twelve completed captures analyzed",
+      "finding": "The finalized Session 03 analysis supplies corrected quality, convergence, and cost evidence; failed attempts remain in the ledger.",
+      "document": "E04_product_baseline.md"
+    },
+    {
+      "id": "E05",
+      "slug": "product_isolation",
+      "title": "Product isolation and automatic preparation",
+      "question": "Do SAM product masks and automatic crops remove clutter while retaining useful detail?",
+      "primary_runs": [
+        "R072-R075"
+      ],
+      "reference_runs": [
+        "R068",
+        "R071"
+      ],
+      "status": "Compared; preparation confounds documented",
+      "finding": "Use the aligned common-product target for top-can preparations; down-can and Ramseier are supporting captures.",
+      "document": "E05_product_isolation.md"
+    },
+    {
+      "id": "E06",
+      "slug": "motion",
+      "title": "Measured motion and corrections",
+      "question": "What changes with measured TAE angles and with local/global angle correction?",
+      "primary_runs": [
+        "R066-R071",
+        "R076-R080"
+      ],
+      "reference_runs": [
+        "R074"
+      ],
+      "status": "Compared; causal separation remains open",
+      "finding": "Fixed measured angles are a useful provisional baseline; angle input and calibrated geometry are not fully isolated.",
+      "document": "E06_motion.md"
+    },
+    {
+      "id": "E07",
+      "slug": "axis",
+      "title": "Axis optimization and edge artifacts",
+      "question": "Are edge spurs related to boundary handling, axis-bound width, or calibration?",
+      "primary_runs": [
+        "R081-R084"
+      ],
+      "reference_runs": [
+        "R078"
+      ],
+      "status": "Provisional decision; seed repeats pending",
+      "finding": "R082 projected ±0.5° is the recorded appearance candidate; R084 fixed calibration is the control. Preserve failed R083.",
+      "document": "E07_axis.md"
+    },
+    {
+      "id": "E08",
+      "slug": "capacity",
+      "title": "Capacity and optimization limits",
+      "question": "What stops improving, and does extending densification help?",
+      "primary_runs": [
+        "R085"
+      ],
+      "reference_runs": [
+        "R081"
+      ],
+      "status": "Audit complete; matched external follow-up pending",
+      "finding": "The R081 audit separates scheduled freezing from saturation. R085 extends growth to 20k; the ledger has float endpoint scores.",
+      "document": "E08_capacity.md"
+    },
+    {
+      "id": "E09",
+      "slug": "product_transfer",
+      "title": "Transfer the R082 setup to more products",
+      "question": "Does the selected R082 setup transfer to Ramseier, KaegiFret, and Weisswein?",
+      "primary_runs": [],
+      "reference_runs": [
+        "R082",
+        "R073",
+        "R054",
+        "R059",
+        "R065"
+      ],
+      "status": "Queue defined; consult logs for current outcomes",
+      "finding": "The current queue uses SAM31AC inputs and projected ±0.5° with fixed TAE angles. New attempts still need stable ledger IDs.",
+      "document": "E09_product_transfer.md"
+    }
+  ]
+}
