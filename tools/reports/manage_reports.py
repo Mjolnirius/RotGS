@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 from tools.reports.research_paths import DATA_ROOT, RESEARCH_ROOT
+from tools.reports.ledger_tables import parse_timeline_table
 
 DOCS = RESEARCH_ROOT
 
@@ -177,8 +178,24 @@ def check(studies, catalog):
         if not Path(r["path"]).exists():
             errors.append(f"Missing catalogue report: {r['path']}")
     ledger = (DOCS/"RUN_LOG.md").read_text()
-    section = ledger.split('<div class="rotgs-run-timeline">', 1)[1].split('</div>', 1)[0]
-    documented = set(re.findall(r"^\| [~*]*(R\d{3})[~*]* \|", section, flags=re.M))
+    sections = re.findall(r'<div class="rotgs-run-timeline">(.*?)</div>', ledger, flags=re.S)
+    documented = set()
+    if not sections:
+        errors.append('Missing run timeline')
+    for index, section in enumerate(sections, start=1):
+        try:
+            _, rows = parse_timeline_table(section)
+            ids = [row[0].strip('~*') for row in rows]
+            if any(not re.fullmatch(r'R\d{3}', rid) for rid in ids):
+                errors.append(f'Invalid run ID in timeline table {index}')
+            if len(ids) != len(set(ids)):
+                errors.append(f'Duplicate run ID in timeline table {index}')
+            if index == 1:
+                documented.update(ids)
+            elif set(ids) - documented:
+                errors.append(f'Timeline table {index} contains runs absent from the full timeline')
+        except ValueError as exc:
+            errors.append(f'Invalid timeline table {index}: {exc}')
     assignments = Counter()
     identifiers = []
     for s in studies["studies"]:

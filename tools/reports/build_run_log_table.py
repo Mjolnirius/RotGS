@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.reports.research_paths import RESEARCH_ROOT
+from tools.reports.ledger_tables import parse_timeline_table
 
 ROOT = RESEARCH_ROOT
 SOURCE = ROOT / 'RUN_LOG.md'
@@ -63,13 +64,7 @@ def sort_key(text, kind):
 def build():
     document = SOURCE.read_text()
     section = document.split(HEADING, 1)[1].split('</div>', 1)[0]
-    lines = [line for line in section.splitlines() if line.startswith('|')]
-    cells = [[cell.strip() for cell in line.split('|')[1:-1]] for line in lines]
-    headers, separator, *rows = cells
-    if not all(re.fullmatch(r':?-+:?', cell) for cell in separator):
-        raise ValueError('Expected a Markdown table separator')
-    if len(headers) != 12 or any(len(row) != len(headers) for row in rows):
-        raise ValueError('Unexpected timeline columns')
+    headers, rows = parse_timeline_table(section)
     kinds = ['text', 'date', 'number', 'text', 'text', 'number', 'number', 'number', 'number', 'number', 'text', 'text']
     head = []
     for index, (label, kind) in enumerate(zip(headers, kinds)):
