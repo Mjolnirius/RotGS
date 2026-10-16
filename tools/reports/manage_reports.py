@@ -64,7 +64,8 @@ def build(studies, catalog):
               "(E03), and product coverage (E04). Product isolation (E05) and measured-motion "
               "comparisons (E06) motivated the axis investigation (E07). The R081 audit and "
               "growth experiment (E08) revisit optimization limits. The current queue transfers "
-              "the selected R082 setup to other products (E09). These are research threads; "
+              "the selected R082 setup to other products (E09). The method comparison "
+              "(E10) evaluates COLMAP + calibrated 3DGS against RotGS references. These are research threads; "
               "their runs and references can overlap in time.", "",
               "Future appearance/SH correctness experiments remain proposals until they receive "
               "a registered study and actual run records. Historical results retain their source "
